@@ -23,10 +23,10 @@ struct Metrics {
         return static_cast<double>(operations) / static_cast<double>(dram_bytes);
     }
 
-    double effective_gops() const {
+    double effective_ops_per_cycle() const {
         if (total_cycles == 0) {
             return 0.0;
         }
-        return static_cast<double>(operations) / static_cast<double>(total_cycles) / 1.0e9;
+        return static_cast<double>(operations) / static_cast<double>(total_cycles);
     }
 };

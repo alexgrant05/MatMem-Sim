@@ -15,7 +15,7 @@ struct TileWork {
     std::uint64_t load_bytes = 0;
     std::uint64_t store_bytes = 0;
     std::uint64_t operations = 0;
-    std::size_t scratchpad_bytes = 0;
+    std::uint64_t scratchpad_bytes = 0;
 };
 
 class TilingEngine {

@@ -1,14 +1,14 @@
 #pragma once
 
-#include <cstddef>
+#include <cstdint>
 
 class Scratchpad {
 public:
-    explicit Scratchpad(std::size_t capacity_bytes);
+    explicit Scratchpad(std::uint64_t capacity_bytes);
 
-    bool can_hold(std::size_t bytes) const;
-    std::size_t capacity_bytes() const;
+    bool can_hold(std::uint64_t bytes) const;
+    std::uint64_t capacity_bytes() const;
 
 private:
-    std::size_t capacity_bytes_;
+    std::uint64_t capacity_bytes_;
 };

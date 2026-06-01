@@ -15,26 +15,49 @@ std::uint64_t compute_cycles(const HardwareParams& params, std::uint64_t operati
     return std::max<std::uint64_t>(1, ceil_div(operations, std::max<std::uint64_t>(1, params.compute_ops_per_cycle)));
 }
 
-std::vector<TileWork> build_row_stationary(const HardwareParams& p) {
+// Returns params with tile_m/n/k set to the largest square tile that allows
+// num_buffers tiles to reside in the scratchpad simultaneously.
+// Each buffer holds A + B + C = 3 * t^2 * element_bytes bytes.
+// If tile_m is already non-zero the caller specified explicit tiles; leave them.
+HardwareParams apply_auto_tile(HardwareParams p, std::uint64_t num_buffers) {
+    if (p.tile_m != 0) {
+        return p;
+    }
+    const double budget = static_cast<double>(p.scratchpad_bytes) /
+                          (static_cast<double>(num_buffers) * 3.0 *
+                           static_cast<double>(p.element_bytes));
+    auto t = static_cast<std::uint64_t>(std::sqrt(budget));
+    const auto max_dim = std::min({p.matrix_m, p.matrix_n, p.matrix_k});
+    t = std::max<std::uint64_t>(1, std::min(t, max_dim));
+    p.tile_m = p.tile_n = p.tile_k = t;
+    return p;
+}
+
+std::vector<TileWork> build_row_stationary(const HardwareParams& p_in) {
+    const auto p = apply_auto_tile(p_in, 1);
     std::vector<TileWork> work;
     const auto mt = ceil_div(p.matrix_m, p.tile_m);
     const auto nt = ceil_div(p.matrix_n, p.tile_n);
     const auto kt = ceil_div(p.matrix_k, p.tile_k);
 
+    const auto a_bytes = p.tile_m * p.tile_k * p.element_bytes;
+    const auto b_bytes = p.tile_k * p.tile_n * p.element_bytes;
+    const auto c_bytes = p.tile_m * p.tile_n * p.element_bytes;
+
     for (std::uint64_t mi = 0; mi < mt; ++mi) {
-        for (std::uint64_t ni = 0; ni < nt; ++ni) {
-            for (std::uint64_t ki = 0; ki < kt; ++ki) {
-                const auto a_bytes = p.tile_m * p.tile_k * p.element_bytes;
-                const auto b_bytes = p.tile_k * p.tile_n * p.element_bytes;
-                const auto c_bytes = p.tile_m * p.tile_n * p.element_bytes;
-                work.push_back({a_bytes + b_bytes + c_bytes, c_bytes, 2 * p.tile_m * p.tile_n * p.tile_k, a_bytes + b_bytes + c_bytes});
+        for (std::uint64_t ki = 0; ki < kt; ++ki) {
+            for (std::uint64_t ni = 0; ni < nt; ++ni) {
+                // A(mi,ki) stays resident across all ni; only reload it on the first ni
+                const auto load = (ni == 0 ? a_bytes : 0) + b_bytes + c_bytes;
+                work.push_back({load, c_bytes, 2 * p.tile_m * p.tile_n * p.tile_k, a_bytes + b_bytes + c_bytes});
             }
         }
     }
     return work;
 }
 
-std::vector<TileWork> build_output_stationary(const HardwareParams& p) {
+std::vector<TileWork> build_output_stationary(const HardwareParams& p_in) {
+    const auto p = apply_auto_tile(p_in, 1);
     std::vector<TileWork> work;
     const auto mt = ceil_div(p.matrix_m, p.tile_m);
     const auto nt = ceil_div(p.matrix_n, p.tile_n);
@@ -45,13 +68,13 @@ std::vector<TileWork> build_output_stationary(const HardwareParams& p) {
             const auto c_bytes = p.tile_m * p.tile_n * p.element_bytes;
             std::uint64_t load_bytes = c_bytes;
             std::uint64_t ops = 0;
-            std::size_t peak_bytes = c_bytes;
+            std::uint64_t peak_bytes = c_bytes;
             for (std::uint64_t ki = 0; ki < kt; ++ki) {
                 const auto a_bytes = p.tile_m * p.tile_k * p.element_bytes;
                 const auto b_bytes = p.tile_k * p.tile_n * p.element_bytes;
                 load_bytes += a_bytes + b_bytes;
                 ops += 2 * p.tile_m * p.tile_n * p.tile_k;
-                peak_bytes = std::max<std::size_t>(peak_bytes, c_bytes + a_bytes + b_bytes);
+                peak_bytes = std::max<std::uint64_t>(peak_bytes, c_bytes + a_bytes + b_bytes);
             }
             work.push_back({load_bytes, c_bytes, ops, peak_bytes});
         }
@@ -62,7 +85,15 @@ std::vector<TileWork> build_output_stationary(const HardwareParams& p) {
 } // namespace
 
 SequentialTilingEngine::SequentialTilingEngine(HardwareParams params, std::vector<TileWork> work)
-    : params_(params), work_(std::move(work)) {}
+    : params_(params), work_(std::move(work)) {
+    for (const auto& tile : work_) {
+        if (tile.scratchpad_bytes > params_.scratchpad_bytes) {
+            throw std::invalid_argument(
+                "tile requires " + std::to_string(tile.scratchpad_bytes) +
+                " scratchpad bytes but capacity is " + std::to_string(params_.scratchpad_bytes));
+        }
+    }
+}
 
 void SequentialTilingEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& metrics) {
     if (done()) {
@@ -140,7 +171,15 @@ std::string OutputStationaryEngine::name() const {
 }
 
 DoubleBufferEngine::DoubleBufferEngine(const HardwareParams& params)
-    : params_(params), work_(build_output_stationary(params)) {}
+    : params_(apply_auto_tile(params, 2)), work_(build_output_stationary(params_)) {
+    for (const auto& tile : work_) {
+        if (tile.scratchpad_bytes > params.scratchpad_bytes) {
+            throw std::invalid_argument(
+                "tile requires " + std::to_string(tile.scratchpad_bytes) +
+                " scratchpad bytes but capacity is " + std::to_string(params.scratchpad_bytes));
+        }
+    }
+}
 
 std::string DoubleBufferEngine::name() const {
     return "double_buffer";
@@ -202,9 +241,11 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
     }
 
     ++index_;
-    current_ready_ = can_double_buffer && prefetched_index_ > index_;
     current_store_issued_ = false;
-    if (current_ready_ && index_ < work_.size()) {
+    const bool next_can_double_buffer = index_ < work_.size() &&
+        scratchpad.can_hold(work_[index_].scratchpad_bytes * 2);
+    current_ready_ = next_can_double_buffer && prefetched_index_ > index_;
+    if (current_ready_) {
         compute_remaining_ = compute_cycles(params_, work_[index_].operations);
         metrics.operations += work_[index_].operations;
     }
