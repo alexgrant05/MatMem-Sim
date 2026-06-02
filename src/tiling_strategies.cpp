@@ -20,7 +20,16 @@ std::uint64_t compute_cycles(const HardwareParams& params, std::uint64_t operati
 // Each buffer holds A + B + C = 3 * t^2 * element_bytes bytes.
 // If tile_m is already non-zero the caller specified explicit tiles; leave them.
 HardwareParams apply_auto_tile(HardwareParams p, std::uint64_t num_buffers) {
-    if (p.tile_m != 0) {
+    const bool any = (p.tile_m != 0) || (p.tile_n != 0) || (p.tile_k != 0);
+    const bool all = (p.tile_m != 0) && (p.tile_n != 0) && (p.tile_k != 0);
+    if (any && !all) {
+        throw std::invalid_argument(
+            "--tile-m/n/k must all be set together or all left at 0 (auto); "
+            "got tile_m=" + std::to_string(p.tile_m) +
+            " tile_n=" + std::to_string(p.tile_n) +
+            " tile_k=" + std::to_string(p.tile_k));
+    }
+    if (all) {
         return p;
     }
     const double budget = static_cast<double>(p.scratchpad_bytes) /
@@ -40,16 +49,22 @@ std::vector<TileWork> build_row_stationary(const HardwareParams& p_in) {
     const auto nt = ceil_div(p.matrix_n, p.tile_n);
     const auto kt = ceil_div(p.matrix_k, p.tile_k);
 
-    const auto a_bytes = p.tile_m * p.tile_k * p.element_bytes;
-    const auto b_bytes = p.tile_k * p.tile_n * p.element_bytes;
-    const auto c_bytes = p.tile_m * p.tile_n * p.element_bytes;
+    // Full-tile bytes used only for the scratchpad capacity field (conservative check).
+    const auto sp_bytes = (p.tile_m * p.tile_k + p.tile_k * p.tile_n + p.tile_m * p.tile_n)
+                          * p.element_bytes;
 
     for (std::uint64_t mi = 0; mi < mt; ++mi) {
+        const auto m = std::min(p.tile_m, p.matrix_m - mi * p.tile_m);
         for (std::uint64_t ki = 0; ki < kt; ++ki) {
+            const auto k = std::min(p.tile_k, p.matrix_k - ki * p.tile_k);
+            const auto a_bytes = m * k * p.element_bytes;
             for (std::uint64_t ni = 0; ni < nt; ++ni) {
+                const auto n = std::min(p.tile_n, p.matrix_n - ni * p.tile_n);
+                const auto b_bytes = k * n * p.element_bytes;
+                const auto c_bytes = m * n * p.element_bytes;
                 // A(mi,ki) stays resident across all ni; only reload it on the first ni
                 const auto load = (ni == 0 ? a_bytes : 0) + b_bytes + c_bytes;
-                work.push_back({load, c_bytes, 2 * p.tile_m * p.tile_n * p.tile_k, a_bytes + b_bytes + c_bytes});
+                work.push_back({load, c_bytes, 2 * m * n * k, sp_bytes});
             }
         }
     }
@@ -64,16 +79,19 @@ std::vector<TileWork> build_output_stationary(const HardwareParams& p_in) {
     const auto kt = ceil_div(p.matrix_k, p.tile_k);
 
     for (std::uint64_t mi = 0; mi < mt; ++mi) {
+        const auto m = std::min(p.tile_m, p.matrix_m - mi * p.tile_m);
         for (std::uint64_t ni = 0; ni < nt; ++ni) {
-            const auto c_bytes = p.tile_m * p.tile_n * p.element_bytes;
+            const auto n = std::min(p.tile_n, p.matrix_n - ni * p.tile_n);
+            const auto c_bytes = m * n * p.element_bytes;
             std::uint64_t load_bytes = c_bytes;
             std::uint64_t ops = 0;
             std::uint64_t peak_bytes = c_bytes;
             for (std::uint64_t ki = 0; ki < kt; ++ki) {
-                const auto a_bytes = p.tile_m * p.tile_k * p.element_bytes;
-                const auto b_bytes = p.tile_k * p.tile_n * p.element_bytes;
+                const auto kk = std::min(p.tile_k, p.matrix_k - ki * p.tile_k);
+                const auto a_bytes = m * kk * p.element_bytes;
+                const auto b_bytes = kk * n * p.element_bytes;
                 load_bytes += a_bytes + b_bytes;
-                ops += 2 * p.tile_m * p.tile_n * p.tile_k;
+                ops += 2 * m * n * kk;
                 peak_bytes = std::max<std::uint64_t>(peak_bytes, c_bytes + a_bytes + b_bytes);
             }
             work.push_back({load_bytes, c_bytes, ops, peak_bytes});

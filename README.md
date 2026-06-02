@@ -79,7 +79,7 @@ python plots\plot_results.py results\sweep.csv
 
 The default sweep covers scratchpad sizes `4, 8, 16, 32, 64, 128 KB` and DRAM latencies `50, 100, 200 cycles` for all three strategies (54 simulations). Pass `--matrix-m/n/k` to the sweep script to change matrix dimensions.
 
-The plot script generates four figures in `results/`:
+The plot script generates six figures in `results/`:
 
 | File | Description |
 |------|-------------|
@@ -87,6 +87,8 @@ The plot script generates four figures in `results/`:
 | `scratchpad_pareto.png` | Compute utilization vs scratchpad size |
 | `stall_breakdown.png` | DRAM stall cycles by strategy and scratchpad size |
 | `latency_sensitivity.png` | Compute utilization vs scratchpad at each DRAM latency, one panel per strategy |
+| `bandwidth_sensitivity.png` | Compute utilization vs scratchpad at each DRAM bandwidth, one panel per strategy |
+| `energy_efficiency.png` | Energy efficiency (ops/pJ) vs scratchpad size per strategy |
 
 ## Metrics
 
@@ -101,6 +103,25 @@ The simulator emits:
 | `compute_utilization` | `compute_cycles / total_cycles` |
 | `arithmetic_intensity` | `operations / dram_bytes` (ops/byte) |
 | `effective_ops_per_cycle` | `operations / total_cycles` |
+| `energy_pj` | Total energy in picojoules: DRAM + SRAM + MAC (see energy model below) |
+| `ops_per_pj` | Energy efficiency: `operations / energy_pj` |
+
+## Energy Model
+
+Energy is computed post-simulation from three components using constants from Horowitz ISSCC 2014:
+
+```
+operations = 2 × MACs  (stored as FLOPs; one MAC = one multiply + one add)
+
+sram_accesses = dram_bytes / element_bytes   (scratchpad I/O in elements)
+              + operations                   (2 operand reads per MAC × ops/2 MACs = ops)
+
+energy_pj = dram_bytes        × 200 pJ/byte     (DDR4 off-chip access)
+          + sram_accesses     × 5.0 pJ/access   (on-chip SRAM read or write, per element)
+          + (operations / 2)  × 3.7 pJ/MAC      (ops/2 = number of MACs)
+```
+
+Key finding: **double buffering improves compute utilization but often reduces energy efficiency** relative to output stationary. The smaller tiles required for dual-buffer prefetching increase total DRAM traffic, and DRAM energy dominates the budget.
 
 ## Tiling Strategies
 

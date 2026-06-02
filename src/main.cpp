@@ -16,10 +16,29 @@ std::string value_after(int& i, int argc, char** argv) {
     return argv[++i];
 }
 
+// operations = 2 * MACs (FLOPs). Energy is:
+//   DRAM:  dram_bytes * E_dram_per_byte
+//   SRAM:  (dram_bytes/elem + operations) * E_sram_per_access
+//            dram_bytes/elem  = scratchpad I/O elements
+//            operations       = 2 operand reads per MAC = 2*(ops/2) = ops
+//   MAC:   (operations/2) * E_mac_pj   [ops/2 = number of MACs]
+struct EnergyResult { double energy_pj; double ops_per_pj; };
+
+EnergyResult compute_energy(const HardwareParams& p, const Metrics& m) {
+    const double ops = static_cast<double>(m.operations);
+    const double sram_acc = static_cast<double>(m.dram_bytes) / static_cast<double>(p.element_bytes)
+                          + ops;
+    const double e = static_cast<double>(m.dram_bytes) * p.energy_dram_pj_per_byte
+                   + sram_acc * p.energy_sram_pj_per_access
+                   + (ops / 2.0) * p.energy_mac_pj;
+    const double opp = e > 0.0 ? ops / e : 0.0;
+    return {e, opp};
+}
+
 void print_usage() {
     std::cout <<
         "usage: matmem-sim\n"
-        "  [--strategy row_stationary|output_stationary|input_stationary|double_buffer]\n"
+        "  [--strategy row_stationary|output_stationary|double_buffer]\n"
         "  [--scratchpad-kb N]      scratchpad capacity in KB (default 32)\n"
         "  [--dram-latency N]       DRAM round-trip latency in cycles (default 100)\n"
         "  [--bandwidth N]          DRAM bandwidth in bytes/cycle (default 32)\n"
@@ -76,12 +95,14 @@ int main(int argc, char** argv) {
         }
 
         const auto metrics = run_simulation(params, strategy);
+        const auto energy = compute_energy(params, metrics);
 
         if (csv) {
             std::cout << "strategy,scratchpad_kb,dram_latency,bandwidth,compute_ops,"
                          "matrix_m,matrix_n,matrix_k,"
                          "total_cycles,compute_cycles,dram_stall_cycles,dram_bytes,"
-                         "compute_utilization,arithmetic_intensity,effective_ops_per_cycle\n";
+                         "compute_utilization,arithmetic_intensity,effective_ops_per_cycle,"
+                         "energy_pj,ops_per_pj\n";
             std::cout << strategy << ','
                       << params.scratchpad_bytes / 1024 << ','
                       << params.dram_latency_cycles << ','
@@ -96,7 +117,9 @@ int main(int argc, char** argv) {
                       << metrics.dram_bytes << ','
                       << metrics.compute_utilization() << ','
                       << metrics.arithmetic_intensity() << ','
-                      << metrics.effective_ops_per_cycle() << '\n';
+                      << metrics.effective_ops_per_cycle() << ','
+                      << energy.energy_pj << ','
+                      << energy.ops_per_pj << '\n';
         } else {
             std::cout << std::fixed << std::setprecision(4);
             std::cout << "strategy: " << strategy << '\n';
@@ -107,6 +130,8 @@ int main(int argc, char** argv) {
             std::cout << "compute_utilization: " << metrics.compute_utilization() << '\n';
             std::cout << "arithmetic_intensity: " << metrics.arithmetic_intensity() << '\n';
             std::cout << "effective_ops_per_cycle: " << metrics.effective_ops_per_cycle() << '\n';
+            std::cout << "energy_pj: " << energy.energy_pj << '\n';
+            std::cout << "ops_per_pj: " << energy.ops_per_pj << '\n';
         }
     } catch (const std::exception& ex) {
         std::cerr << "error: " << ex.what() << '\n';

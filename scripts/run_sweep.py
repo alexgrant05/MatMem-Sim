@@ -23,13 +23,14 @@ def find_executable() -> Path:
     raise SystemExit("Could not find built matmem-sim executable. Run CMake build first.")
 
 
-def run_one(exe: Path, strategy: str, sp_kb: int, latency: int,
+def run_one(exe: Path, strategy: str, sp_kb: int, latency: int, bandwidth: int,
             matrix_m: int, matrix_n: int, matrix_k: int) -> dict:
     cmd = [
         str(exe),
         "--strategy", strategy,
         "--scratchpad-kb", str(sp_kb),
         "--dram-latency", str(latency),
+        "--bandwidth", str(bandwidth),
         "--matrix-m", str(matrix_m),
         "--matrix-n", str(matrix_n),
         "--matrix-k", str(matrix_k),
@@ -54,17 +55,19 @@ def main() -> None:
     strategies = ["row_stationary", "output_stationary", "double_buffer"]
     scratchpad_kb = [4, 8, 16, 32, 64, 128]
     dram_latencies = [50, 100, 200]
+    bandwidths = [8, 16, 32, 64]
 
     rows = []
-    total = len(strategies) * len(scratchpad_kb) * len(dram_latencies)
+    total = len(strategies) * len(scratchpad_kb) * len(dram_latencies) * len(bandwidths)
     done = 0
     for strategy in strategies:
         for sp_kb in scratchpad_kb:
             for latency in dram_latencies:
-                rows.append(run_one(exe, strategy, sp_kb, latency,
-                                    args.matrix_m, args.matrix_n, args.matrix_k))
-                done += 1
-                print(f"  [{done}/{total}] {strategy} sp={sp_kb}KB lat={latency}", flush=True)
+                for bw in bandwidths:
+                    rows.append(run_one(exe, strategy, sp_kb, latency, bw,
+                                        args.matrix_m, args.matrix_n, args.matrix_k))
+                    done += 1
+                    print(f"  [{done}/{total}] {strategy} sp={sp_kb}KB lat={latency} bw={bw}", flush=True)
 
     with args.out.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))

@@ -15,4 +15,9 @@ struct HardwareParams {
     std::uint64_t tile_m = 0;  // 0 = auto-size to scratchpad capacity
     std::uint64_t tile_n = 0;
     std::uint64_t tile_k = 0;
+
+    // Energy constants (pJ). Defaults from Horowitz ISSCC 2014 / typical accelerator values.
+    double energy_dram_pj_per_byte   = 200.0;  // DDR4 off-chip access
+    double energy_sram_pj_per_access = 5.0;    // on-chip SRAM read or write, per element
+    double energy_mac_pj             = 3.7;    // FP32 multiply-accumulate
 };

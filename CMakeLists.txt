@@ -18,6 +18,19 @@ add_executable(matmem-sim src/main.cpp)
 target_link_libraries(matmem-sim PRIVATE matmem_core)
 
 enable_testing()
-add_executable(smoke_tests tests/test_smoke.cpp)
-target_link_libraries(smoke_tests PRIVATE matmem_core)
-add_test(NAME smoke_tests COMMAND smoke_tests)
+
+add_executable(test_dram tests/test_dram.cpp)
+target_link_libraries(test_dram PRIVATE matmem_core)
+add_test(NAME test_dram COMMAND test_dram)
+
+add_executable(test_scratchpad tests/test_scratchpad.cpp)
+target_link_libraries(test_scratchpad PRIVATE matmem_core)
+add_test(NAME test_scratchpad COMMAND test_scratchpad)
+
+add_executable(test_metrics tests/test_metrics.cpp)
+target_link_libraries(test_metrics PRIVATE matmem_core)
+add_test(NAME test_metrics COMMAND test_metrics)
+
+add_executable(test_simulation tests/test_simulation.cpp)
+target_link_libraries(test_simulation PRIVATE matmem_core)
+add_test(NAME test_simulation COMMAND test_simulation)
