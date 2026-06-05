@@ -34,3 +34,7 @@ add_test(NAME test_metrics COMMAND test_metrics)
 add_executable(test_simulation tests/test_simulation.cpp)
 target_link_libraries(test_simulation PRIVATE matmem_core)
 add_test(NAME test_simulation COMMAND test_simulation)
+
+add_executable(test_smoke tests/test_smoke.cpp)
+target_link_libraries(test_smoke PRIVATE matmem_core)
+add_test(NAME test_smoke COMMAND test_smoke)

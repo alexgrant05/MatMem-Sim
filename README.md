@@ -77,7 +77,7 @@ python scripts\run_sweep.py
 python plots\plot_results.py results\sweep.csv
 ```
 
-The default sweep covers scratchpad sizes `4, 8, 16, 32, 64, 128 KB` and DRAM latencies `50, 100, 200 cycles` for all three strategies (54 simulations). Pass `--matrix-m/n/k` to the sweep script to change matrix dimensions.
+The default sweep covers 3 strategies × 6 scratchpad sizes × 3 DRAM latencies × 4 bandwidths = **216 simulations**. Pass `--matrix-m/n/k` to the sweep script to change matrix dimensions.
 
 The plot script generates six figures in `results/`:
 
@@ -125,7 +125,7 @@ Key finding: **double buffering improves compute utilization but often reduces e
 
 ## Tiling Strategies
 
-**Row stationary** — keeps tile A(mi, ki) resident in the scratchpad and streams B and C across the N dimension. Loop order: `for mi → for ki → for ki → for ni`. A is loaded once per (mi, ki) pair.
+**Row stationary** — keeps tile A(mi, ki) resident in the scratchpad and streams B and C across the N dimension. Loop order: `for mi → for ki → for ni`. A is loaded once per (mi, ki) pair.
 
 **Output stationary** — keeps tile C(mi, ni) resident and accumulates partial sums across all K tiles without writing C back to DRAM between k-iterations. Minimises C traffic at the cost of streaming A and B every k-step.
 

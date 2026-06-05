@@ -2,18 +2,41 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
 namespace {
 
 std::uint64_t ceil_div(std::uint64_t a, std::uint64_t b) {
-    return (a + b - 1) / b;
+    return a / b + (a % b != 0 ? 1 : 0);
 }
 
 std::uint64_t compute_cycles(const HardwareParams& params, std::uint64_t operations) {
-    return std::max<std::uint64_t>(1, ceil_div(operations, std::max<std::uint64_t>(1, params.compute_ops_per_cycle)));
+    if (operations == 0) return 0;
+    return ceil_div(operations, std::max<std::uint64_t>(1, params.compute_ops_per_cycle));
 }
+
+// Multiplies two uint64_t values and throws std::overflow_error if the result
+// would exceed UINT64_MAX (e.g. tile dimension products with large matrices).
+std::uint64_t safe_mul(std::uint64_t a, std::uint64_t b) {
+    if (a != 0 && b > std::numeric_limits<std::uint64_t>::max() / a) {
+        throw std::overflow_error("tile dimension product overflows uint64_t");
+    }
+    return a * b;
+}
+
+// Adds two uint64_t values and throws std::overflow_error on wrap.
+std::uint64_t safe_add(std::uint64_t a, std::uint64_t b) {
+    if (a > std::numeric_limits<std::uint64_t>::max() - b) {
+        throw std::overflow_error("tile dimension sum overflows uint64_t");
+    }
+    return a + b;
+}
+
+// Maximum work items materialised per strategy to prevent OOM.
+// 10M tiles × 32 bytes = 320 MB ceiling.
+static constexpr std::uint64_t MAX_TILE_COUNT = 10'000'000;
 
 // Returns params with tile_m/n/k set to the largest square tile that allows
 // num_buffers tiles to reside in the scratchpad simultaneously.
@@ -49,22 +72,30 @@ std::vector<TileWork> build_row_stationary(const HardwareParams& p_in) {
     const auto nt = ceil_div(p.matrix_n, p.tile_n);
     const auto kt = ceil_div(p.matrix_k, p.tile_k);
 
-    // Full-tile bytes used only for the scratchpad capacity field (conservative check).
-    const auto sp_bytes = (p.tile_m * p.tile_k + p.tile_k * p.tile_n + p.tile_m * p.tile_n)
-                          * p.element_bytes;
+    if (mt == 0 || nt == 0 || kt == 0) return work;
+
+    const auto tile_count = safe_mul(safe_mul(mt, nt), kt);
+    if (tile_count > MAX_TILE_COUNT) {
+        throw std::overflow_error(
+            "row_stationary tile count " + std::to_string(tile_count) +
+            " exceeds limit " + std::to_string(MAX_TILE_COUNT));
+    }
+    work.reserve(static_cast<std::size_t>(tile_count));
 
     for (std::uint64_t mi = 0; mi < mt; ++mi) {
         const auto m = std::min(p.tile_m, p.matrix_m - mi * p.tile_m);
         for (std::uint64_t ki = 0; ki < kt; ++ki) {
             const auto k = std::min(p.tile_k, p.matrix_k - ki * p.tile_k);
-            const auto a_bytes = m * k * p.element_bytes;
+            const auto a_bytes = safe_mul(safe_mul(m, k), p.element_bytes);
             for (std::uint64_t ni = 0; ni < nt; ++ni) {
                 const auto n = std::min(p.tile_n, p.matrix_n - ni * p.tile_n);
-                const auto b_bytes = k * n * p.element_bytes;
-                const auto c_bytes = m * n * p.element_bytes;
+                const auto b_bytes = safe_mul(safe_mul(k, n), p.element_bytes);
+                const auto c_bytes = safe_mul(safe_mul(m, n), p.element_bytes);
+                // Scratchpad peak: A stays resident + current B + C
+                const auto sp_bytes = safe_add(safe_add(a_bytes, b_bytes), c_bytes);
                 // A(mi,ki) stays resident across all ni; only reload it on the first ni
-                const auto load = (ni == 0 ? a_bytes : 0) + b_bytes + c_bytes;
-                work.push_back({load, c_bytes, 2 * m * n * k, sp_bytes});
+                const auto load = safe_add(safe_add(ni == 0 ? a_bytes : std::uint64_t(0), b_bytes), c_bytes);
+                work.push_back({load, c_bytes, safe_mul(safe_mul(safe_mul(2ULL, m), n), k), sp_bytes});
             }
         }
     }
@@ -78,23 +109,38 @@ std::vector<TileWork> build_output_stationary(const HardwareParams& p_in) {
     const auto nt = ceil_div(p.matrix_n, p.tile_n);
     const auto kt = ceil_div(p.matrix_k, p.tile_k);
 
+    if (mt == 0 || nt == 0 || kt == 0) return work;
+
+    const auto tile_count = safe_mul(mt, nt);
+    const auto total_work = safe_mul(tile_count, kt); // bounds inner K-loop iterations too
+    if (total_work > MAX_TILE_COUNT) {
+        throw std::overflow_error(
+            "output_stationary construction work " + std::to_string(total_work) +
+            " exceeds limit " + std::to_string(MAX_TILE_COUNT));
+    }
+    work.reserve(static_cast<std::size_t>(total_work));
+
     for (std::uint64_t mi = 0; mi < mt; ++mi) {
         const auto m = std::min(p.tile_m, p.matrix_m - mi * p.tile_m);
         for (std::uint64_t ni = 0; ni < nt; ++ni) {
             const auto n = std::min(p.tile_n, p.matrix_n - ni * p.tile_n);
-            const auto c_bytes = m * n * p.element_bytes;
-            std::uint64_t load_bytes = c_bytes;
-            std::uint64_t ops = 0;
-            std::uint64_t peak_bytes = c_bytes;
+            const auto c_bytes = safe_mul(safe_mul(m, n), p.element_bytes);
             for (std::uint64_t ki = 0; ki < kt; ++ki) {
                 const auto kk = std::min(p.tile_k, p.matrix_k - ki * p.tile_k);
-                const auto a_bytes = m * kk * p.element_bytes;
-                const auto b_bytes = kk * n * p.element_bytes;
-                load_bytes += a_bytes + b_bytes;
-                ops += 2 * m * n * kk;
-                peak_bytes = std::max<std::uint64_t>(peak_bytes, c_bytes + a_bytes + b_bytes);
+                const auto a_bytes = safe_mul(safe_mul(m, kk), p.element_bytes);
+                const auto b_bytes = safe_mul(safe_mul(kk, n), p.element_bytes);
+                // C stays resident across all K tiles; A+B loaded every K tile.
+                // C is loaded on the first K tile and stored on the last.
+                const auto load = safe_add(ki == 0 ? c_bytes : std::uint64_t(0),
+                                           safe_add(a_bytes, b_bytes));
+                const auto store = (ki == kt - 1) ? c_bytes : std::uint64_t(0);
+                const auto sp_bytes = safe_add(safe_add(c_bytes, a_bytes), b_bytes);
+                const auto ops = safe_mul(safe_mul(safe_mul(2ULL, m), n), kk);
+                // C is already resident for ki > 0; the double-buffer prefetch
+                // check uses this to avoid double-counting the shared C tile.
+                const auto resident = ki == 0 ? std::uint64_t(0) : c_bytes;
+                work.push_back({load, store, ops, sp_bytes, resident});
             }
-            work.push_back({load_bytes, c_bytes, ops, peak_bytes});
         }
     }
     return work;
@@ -140,7 +186,7 @@ void SequentialTilingEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metri
 
     if (!compute_started_) {
         compute_remaining_ = compute_cycles(params_, tile.operations);
-        metrics.operations += tile.operations;
+        metrics.operations = safe_add(metrics.operations, tile.operations);
         compute_started_ = true;
     }
 
@@ -209,7 +255,6 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
     }
 
     auto& tile = work_[index_];
-    const bool can_double_buffer = scratchpad.can_hold(tile.scratchpad_bytes * 2);
     if (!scratchpad.can_hold(tile.scratchpad_bytes)) {
         metrics.dram_stall_cycles++;
         dram.tick();
@@ -230,10 +275,25 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
         }
         current_ready_ = true;
         compute_remaining_ = compute_cycles(params_, tile.operations);
-        metrics.operations += tile.operations;
+        metrics.operations = safe_add(metrics.operations, tile.operations);
     }
 
-    if (can_double_buffer && prefetched_index_ == index_ + 1 && prefetched_index_ < work_.size()) {
+    // Compute combined footprint. The next tile's resident_bytes are already
+    // present in the current tile's scratchpad (shared C across K-sub-tiles of
+    // the same output tile), so only the incremental new bytes need to fit.
+    // Saturate to UINT64_MAX on overflow so can_hold() returns false safely.
+    const auto next_sp       = prefetched_index_ < work_.size()
+                               ? work_[prefetched_index_].scratchpad_bytes : 0;
+    const auto next_resident = prefetched_index_ < work_.size()
+                               ? work_[prefetched_index_].resident_bytes : 0;
+    const auto next_new      = next_sp - next_resident; // safe: resident ≤ scratchpad by construction
+    const auto combined_sp   =
+        (next_new <= std::numeric_limits<std::uint64_t>::max() - tile.scratchpad_bytes)
+        ? tile.scratchpad_bytes + next_new
+        : std::numeric_limits<std::uint64_t>::max();
+
+    if (prefetched_index_ == index_ + 1 && prefetched_index_ < work_.size() &&
+        scratchpad.can_hold(combined_sp)) {
         dram.request(work_[prefetched_index_].load_bytes);
         ++prefetched_index_;
     }
@@ -251,7 +311,11 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
         current_store_issued_ = true;
     }
 
-    if (!dram.idle()) {
+    // For the final tile there is no successor compute to hide the store; wait
+    // for DRAM to drain so the engine reaches done() with clean state.
+    // For all other tiles, advance immediately: the store drains in the
+    // background during the next tile's compute cycles (true ping-pong).
+    if (index_ + 1 >= work_.size() && !dram.idle()) {
         metrics.dram_stall_cycles++;
         dram.tick();
         metrics.total_cycles++;
@@ -260,12 +324,10 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
 
     ++index_;
     current_store_issued_ = false;
-    const bool next_can_double_buffer = index_ < work_.size() &&
-        scratchpad.can_hold(work_[index_].scratchpad_bytes * 2);
-    current_ready_ = next_can_double_buffer && prefetched_index_ > index_;
+    current_ready_ = (index_ < work_.size()) && (prefetched_index_ > index_);
     if (current_ready_) {
         compute_remaining_ = compute_cycles(params_, work_[index_].operations);
-        metrics.operations += work_[index_].operations;
+        metrics.operations = safe_add(metrics.operations, work_[index_].operations);
     }
 }
 

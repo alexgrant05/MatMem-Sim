@@ -2,6 +2,7 @@
 #include "simulator.h"
 
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <iomanip>
 #include <iostream>
@@ -14,6 +15,31 @@ std::string value_after(int& i, int argc, char** argv) {
         throw std::invalid_argument(std::string("missing value for ") + argv[i]);
     }
     return argv[++i];
+}
+
+std::uint64_t parse_uint(const std::string& s, const std::string& flag) {
+    if (s.empty() || s[0] == '-') {
+        throw std::invalid_argument("expected non-negative integer for " + flag + ": '" + s + "'");
+    }
+    std::size_t pos = 0;
+    std::uint64_t v;
+    try {
+        v = std::stoull(s, &pos);
+    } catch (const std::exception&) {
+        throw std::invalid_argument("expected non-negative integer for " + flag + ": '" + s + "'");
+    }
+    if (pos != s.size()) {
+        throw std::invalid_argument("expected non-negative integer for " + flag + ": '" + s + "'");
+    }
+    return v;
+}
+
+std::uint64_t parse_pos_uint(const std::string& s, const std::string& flag) {
+    const auto v = parse_uint(s, flag);
+    if (v == 0) {
+        throw std::invalid_argument(flag + " must be greater than zero");
+    }
+    return v;
 }
 
 // operations = 2 * MACs (FLOPs). Energy is:
@@ -65,25 +91,29 @@ int main(int argc, char** argv) {
             if (arg == "--strategy") {
                 strategy = value_after(i, argc, argv);
             } else if (arg == "--scratchpad-kb") {
-                params.scratchpad_bytes = std::stoull(value_after(i, argc, argv)) * 1024;
+                const auto kb = parse_uint(value_after(i, argc, argv), arg);
+                if (kb > std::numeric_limits<std::uint64_t>::max() / 1024) {
+                    throw std::invalid_argument("--scratchpad-kb value too large");
+                }
+                params.scratchpad_bytes = kb * 1024;
             } else if (arg == "--dram-latency") {
-                params.dram_latency_cycles = std::stoull(value_after(i, argc, argv));
+                params.dram_latency_cycles = parse_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--bandwidth") {
-                params.dram_bandwidth_bytes_per_cycle = std::stoull(value_after(i, argc, argv));
+                params.dram_bandwidth_bytes_per_cycle = parse_pos_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--compute-ops") {
-                params.compute_ops_per_cycle = std::stoull(value_after(i, argc, argv));
+                params.compute_ops_per_cycle = parse_pos_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--matrix-m") {
-                params.matrix_m = std::stoull(value_after(i, argc, argv));
+                params.matrix_m = parse_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--matrix-n") {
-                params.matrix_n = std::stoull(value_after(i, argc, argv));
+                params.matrix_n = parse_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--matrix-k") {
-                params.matrix_k = std::stoull(value_after(i, argc, argv));
+                params.matrix_k = parse_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--tile-m") {
-                params.tile_m = std::stoull(value_after(i, argc, argv));
+                params.tile_m = parse_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--tile-n") {
-                params.tile_n = std::stoull(value_after(i, argc, argv));
+                params.tile_n = parse_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--tile-k") {
-                params.tile_k = std::stoull(value_after(i, argc, argv));
+                params.tile_k = parse_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--csv") {
                 csv = true;
             } else if (arg == "--help" || arg == "-h") {

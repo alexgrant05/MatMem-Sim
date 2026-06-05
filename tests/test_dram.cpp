@@ -84,6 +84,21 @@ static void test_pipelined_requests() {
     CHECK(ticks == 203);
 }
 
+// ── 9. request_cycles ceiling must not wrap for huge bytes ───────────────────
+// bytes = UINT64_MAX, bandwidth = 2.
+// Buggy: (UINT64_MAX + 2 - 1) / 2 wraps to 0 transfer cycles (wrong).
+// Fixed: UINT64_MAX / 2 + 1 = 9223372036854775808 transfer cycles.
+// After 1 tick the model must still be busy, not idle.
+static void test_request_cycles_no_wrap() {
+    HardwareParams p;
+    p.dram_latency_cycles = 0;
+    p.dram_bandwidth_bytes_per_cycle = 2;
+    DRAMModel dram(p);
+    dram.request(18446744073709551615ULL); // UINT64_MAX bytes
+    dram.tick(); // dequeues; with bug active_remaining_ becomes 0 immediately
+    CHECK(!dram.idle()); // must still be busy — UINT64_MAX/2 cycles remain
+}
+
 static void test_not_idle_while_pending() {
     DRAMModel dram(make_params());
     dram.request(32);
@@ -104,6 +119,7 @@ int main() {
     test_bandwidth_ceiling();
     test_pipelined_requests();
     test_not_idle_while_pending();
+    test_request_cycles_no_wrap();
 
     if (g_failures == 0) {
         std::cout << "test_dram: all tests passed\n";
