@@ -52,7 +52,7 @@ def main() -> None:
     exe = find_executable()
     args.out.parent.mkdir(exist_ok=True)
 
-    strategies = ["row_stationary", "output_stationary", "double_buffer"]
+    strategies = ["row_stationary", "output_stationary", "input_stationary", "double_buffer"]
     scratchpad_kb = [4, 8, 16, 32, 64, 128]
     dram_latencies = [50, 100, 200]
     bandwidths = [8, 16, 32, 64]

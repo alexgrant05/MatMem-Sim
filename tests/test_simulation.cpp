@@ -347,6 +347,29 @@ static void test_double_buffer_k_tile_prefetch_no_double_count() {
     CHECK(db.dram_bytes == os.dram_bytes);
 }
 
+// ── Double buffer must not compute a prefetched tile before its load finishes ─
+// 64×64×2, tile 64×64×1, scratchpad 20KB. Two K-sub-tiles of one output tile:
+//   tile0: load=16896 B (628 cyc), compute=32 cyc, store=0
+//   tile1: load=512 B  (116 cyc), compute=32 cyc, store=16384 B (612 cyc)
+// tile1 is prefetched during tile0's 32 compute cycles, but its 116-cycle load
+// still has 84 cycles outstanding when tile0's compute ends. tile1 must stall
+// those 84 cycles before computing — it cannot overlap compute with its own
+// still-active load. Correct total:
+//   628 (tile0 load) + 32 (tile0 compute) + 84 (tile1 load finish)
+//   + 32 (tile1 compute) + 612 (tile1 store drain) = 1388.
+// The bug treated tile1 as ready the instant its load was *issued*, hiding 32
+// load cycles under tile1's compute → 1356.
+static void test_double_buffer_waits_for_prefetch_completion() {
+    HardwareParams p;
+    p.matrix_m = 64; p.matrix_n = 64; p.matrix_k = 2;
+    p.tile_m = 64;   p.tile_n = 64;  p.tile_k = 1;
+    p.scratchpad_bytes = 20 * 1024;
+
+    const auto db = run_simulation(p, "double_buffer");
+    CHECK(db.total_cycles == 1388);
+    CHECK(db.compute_cycles + db.dram_stall_cycles == db.total_cycles);
+}
+
 static void test_output_stationary_tile_k_affects_cycles() {
     HardwareParams p;
     p.matrix_m = 64; p.matrix_n = 64; p.matrix_k = 64;
@@ -407,6 +430,7 @@ int main() {
     test_tile_byte_addition_overflow_throws();
     test_double_buffer_store_overlaps_with_compute();
     test_double_buffer_k_tile_prefetch_no_double_count();
+    test_double_buffer_waits_for_prefetch_completion();
     test_output_stationary_tile_k_affects_cycles();
     test_huge_tile_count_throws();
     test_huge_k_count_throws();

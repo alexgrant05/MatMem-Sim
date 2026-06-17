@@ -15,6 +15,7 @@ void DRAMModel::request(std::uint64_t bytes) {
         throw std::overflow_error("bytes_transferred_ overflow");
     }
     bytes_transferred_ += bytes;
+    backlog_remaining_ += request_cycles(bytes);
 }
 
 void DRAMModel::tick() {
@@ -25,6 +26,7 @@ void DRAMModel::tick() {
 
     if (active_remaining_ > 0) {
         --active_remaining_;
+        --backlog_remaining_;
     }
 }
 
@@ -34,6 +36,10 @@ bool DRAMModel::idle() const {
 
 std::uint64_t DRAMModel::bytes_transferred() const {
     return bytes_transferred_;
+}
+
+std::uint64_t DRAMModel::backlog_cycles() const {
+    return backlog_remaining_;
 }
 
 std::uint64_t DRAMModel::request_cycles(std::uint64_t bytes) const {

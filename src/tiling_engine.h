@@ -74,6 +74,9 @@ public:
     bool done() const override;
 
 private:
+    // Ticks DRAM one cycle and ages the outstanding-load countdowns with it.
+    void tick_dram(DRAMModel& dram);
+
     HardwareParams params_;
     std::vector<TileWork> work_;
     std::size_t index_ = 0;
@@ -81,6 +84,10 @@ private:
     bool current_ready_ = false;
     bool current_store_issued_ = false;
     std::uint64_t compute_remaining_ = 0;
+    // Cycles until the current tile's load completes (0 = data resident).
+    std::uint64_t cur_load_remaining_ = 0;
+    // Cycles until the prefetched next tile's load completes.
+    std::uint64_t next_load_remaining_ = 0;
 };
 
 std::unique_ptr<TilingEngine> make_strategy(const std::string& name, const HardwareParams& params);

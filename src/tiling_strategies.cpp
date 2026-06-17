@@ -296,6 +296,12 @@ std::string DoubleBufferEngine::name() const {
     return "double_buffer";
 }
 
+void DoubleBufferEngine::tick_dram(DRAMModel& dram) {
+    dram.tick();
+    if (cur_load_remaining_ > 0) --cur_load_remaining_;
+    if (next_load_remaining_ > 0) --next_load_remaining_;
+}
+
 void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& metrics) {
     if (done()) {
         return;
@@ -304,7 +310,7 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
     auto& tile = work_[index_];
     if (!scratchpad.can_hold(tile.scratchpad_bytes)) {
         metrics.dram_stall_cycles++;
-        dram.tick();
+        tick_dram(dram);
         metrics.total_cycles++;
         return;
     }
@@ -312,11 +318,15 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
     if (!current_ready_) {
         if (prefetched_index_ == index_) {
             dram.request(tile.load_bytes);
+            cur_load_remaining_ = dram.backlog_cycles();
             ++prefetched_index_;
         }
-        if (!dram.idle()) {
+        // Wait for *this tile's* load to finish, not for the whole DRAM queue:
+        // a writeback store from the previous tile may still be draining behind
+        // it, and that store is meant to overlap with this tile's compute.
+        if (cur_load_remaining_ > 0) {
             metrics.dram_stall_cycles++;
-            dram.tick();
+            tick_dram(dram);
             metrics.total_cycles++;
             return;
         }
@@ -342,13 +352,14 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
     if (prefetched_index_ == index_ + 1 && prefetched_index_ < work_.size() &&
         scratchpad.can_hold(combined_sp)) {
         dram.request(work_[prefetched_index_].load_bytes);
+        next_load_remaining_ = dram.backlog_cycles();
         ++prefetched_index_;
     }
 
     if (compute_remaining_ > 0) {
         --compute_remaining_;
         metrics.compute_cycles++;
-        dram.tick();
+        tick_dram(dram);
         metrics.total_cycles++;
         return;
     }
@@ -364,14 +375,19 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
     // background during the next tile's compute cycles (true ping-pong).
     if (index_ + 1 >= work_.size() && !dram.idle()) {
         metrics.dram_stall_cycles++;
-        dram.tick();
+        tick_dram(dram);
         metrics.total_cycles++;
         return;
     }
 
     ++index_;
     current_store_issued_ = false;
-    current_ready_ = (index_ < work_.size()) && (prefetched_index_ > index_);
+    // The prefetched next tile inherits its outstanding load countdown; it is
+    // only ready to compute once that load has actually completed (== 0).
+    cur_load_remaining_ = next_load_remaining_;
+    next_load_remaining_ = 0;
+    current_ready_ = (index_ < work_.size()) && (prefetched_index_ > index_) &&
+                     (cur_load_remaining_ == 0);
     if (current_ready_) {
         compute_remaining_ = compute_cycles(params_, work_[index_].operations);
         metrics.operations = safe_add(metrics.operations, work_[index_].operations);

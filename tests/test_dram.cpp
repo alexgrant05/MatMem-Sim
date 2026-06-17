@@ -110,6 +110,32 @@ static void test_not_idle_while_pending() {
     CHECK(!dram.idle()); // second request now active
 }
 
+// ── backlog_cycles reports cycles until all queued work completes ────────────
+// Read immediately after a request, it gives that request's completion cycle
+// (FIFO, single server). It counts down one per tick and reaches 0 exactly when
+// the model goes idle — this is what lets the double-buffer engine wait for a
+// specific load to finish while a later store is still queued behind it.
+static void test_backlog_cycles_tracks_completion() {
+    DRAMModel dram(make_params());
+    CHECK(dram.backlog_cycles() == 0);
+
+    dram.request(64);                          // 100 + ceil(64/32) = 102 cycles
+    CHECK(dram.backlog_cycles() == 102);
+    dram.request(32);                          // + 100 + 1 = 101 cycles
+    CHECK(dram.backlog_cycles() == 203);
+
+    int ticks = 0;
+    while (dram.backlog_cycles() > 0) { dram.tick(); ++ticks; }
+    CHECK(ticks == 203);
+    CHECK(dram.idle());                        // hits 0 exactly when idle
+}
+
+static void test_backlog_ignores_zero_byte_request() {
+    DRAMModel dram(make_params());
+    dram.request(0);
+    CHECK(dram.backlog_cycles() == 0);
+}
+
 int main() {
     test_starts_idle();
     test_zero_byte_request_ignored();
@@ -120,6 +146,8 @@ int main() {
     test_pipelined_requests();
     test_not_idle_while_pending();
     test_request_cycles_no_wrap();
+    test_backlog_cycles_tracks_completion();
+    test_backlog_ignores_zero_byte_request();
 
     if (g_failures == 0) {
         std::cout << "test_dram: all tests passed\n";
