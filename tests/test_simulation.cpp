@@ -19,7 +19,7 @@ static HardwareParams small_matrix() {
 // ── 1. Basic sanity ────────────────────────────────────────────────────────
 static void test_all_strategies_produce_nonzero_metrics() {
     const auto p = small_matrix();
-    for (const auto* s : {"row_stationary", "output_stationary", "double_buffer"}) {
+    for (const auto* s : {"row_stationary", "output_stationary", "input_stationary", "double_buffer"}) {
         const auto m = run_simulation(p, s);
         CHECK(m.total_cycles > 0);
         CHECK(m.compute_cycles > 0);
@@ -36,7 +36,7 @@ static void test_all_strategies_produce_nonzero_metrics() {
 // and always increments total_cycles. So their sum must equal total_cycles.
 static void test_cycle_accounting_invariant() {
     const auto p = small_matrix();
-    for (const auto* s : {"row_stationary", "output_stationary", "double_buffer"}) {
+    for (const auto* s : {"row_stationary", "output_stationary", "input_stationary", "double_buffer"}) {
         const auto m = run_simulation(p, s);
         CHECK(m.compute_cycles + m.dram_stall_cycles == m.total_cycles);
     }
@@ -45,7 +45,7 @@ static void test_cycle_accounting_invariant() {
 // ── 3. Compute utilization is in (0, 1] ───────────────────────────────────
 static void test_utilization_range() {
     const auto p = small_matrix();
-    for (const auto* s : {"row_stationary", "output_stationary", "double_buffer"}) {
+    for (const auto* s : {"row_stationary", "output_stationary", "input_stationary", "double_buffer"}) {
         const auto m = run_simulation(p, s);
         CHECK(m.compute_utilization() > 0.0);
         CHECK(m.compute_utilization() <= 1.0);
@@ -59,7 +59,51 @@ static void test_row_output_same_operations() {
     const auto p = small_matrix();
     const auto row = run_simulation(p, "row_stationary");
     const auto out = run_simulation(p, "output_stationary");
+    const auto in = run_simulation(p, "input_stationary");
     CHECK(row.operations == out.operations);
+    CHECK(row.operations == in.operations);
+}
+
+// ── Input stationary is the M<->N mirror of row stationary ─────────────────
+// Row stationary keeps A(mi,ki) resident across ni; input stationary keeps
+// B(ki,ni) resident across mi. On a square symmetric problem (M=N=K) with a
+// square tile, swapping M<->N and A<->B maps one schedule exactly onto the
+// other, so total DRAM bytes and total cycles must match.
+static void test_input_row_symmetric() {
+    HardwareParams p;
+    p.matrix_m = p.matrix_n = p.matrix_k = 128;
+    p.tile_m = p.tile_n = p.tile_k = 32;
+    p.scratchpad_bytes = 64 * 1024;
+
+    const auto row = run_simulation(p, "row_stationary");
+    const auto in = run_simulation(p, "input_stationary");
+
+    CHECK(in.operations == row.operations);
+    CHECK(in.dram_bytes == row.dram_bytes);
+    CHECK(in.total_cycles == row.total_cycles);
+    CHECK(in.compute_cycles + in.dram_stall_cycles == in.total_cycles);
+}
+
+// ── Input stationary reuses resident B across the m dimension ──────────────
+// With mt>1 tiles down M, B is loaded once per (ki,ni) and reused for every mi.
+// That reuse must make input stationary move strictly fewer DRAM bytes than a
+// schedule that reloaded B for every mi would. We verify it against the known
+// closed form: B is loaded exactly nt*kt times, not nt*kt*mt times.
+static void test_input_stationary_reuses_b() {
+    HardwareParams p;
+    p.matrix_m = 128; p.matrix_n = 64; p.matrix_k = 64;
+    p.tile_m = p.tile_n = p.tile_k = 32;
+    p.scratchpad_bytes = 64 * 1024;
+
+    const auto in = run_simulation(p, "input_stationary");
+
+    const std::uint64_t mt = 128 / 32, nt = 64 / 32, kt = 64 / 32;
+    const std::uint64_t elem = 4, t = 32;
+    const std::uint64_t a_bytes = t * t * elem, b_bytes = t * t * elem, c_bytes = t * t * elem;
+    // A and C streamed for every (ni,ki,mi); B loaded only on mi==0; C stored each tile.
+    const std::uint64_t loads = mt * nt * kt * (a_bytes + c_bytes) + nt * kt * b_bytes;
+    const std::uint64_t stores = mt * nt * kt * c_bytes;
+    CHECK(in.dram_bytes == loads + stores);
 }
 
 // ── 5. Double buffer prefetch isolates to fewer total cycles ──────────────
@@ -109,7 +153,7 @@ static void test_unknown_strategy_throws() {
 static void test_zero_k_all_zero_metrics() {
     HardwareParams p = small_matrix();
     p.matrix_k = 0;
-    for (const auto* s : {"row_stationary", "output_stationary", "double_buffer"}) {
+    for (const auto* s : {"row_stationary", "output_stationary", "input_stationary", "double_buffer"}) {
         const auto m = run_simulation(p, s);
         CHECK(m.total_cycles == 0);
         CHECK(m.compute_cycles == 0);
@@ -225,6 +269,7 @@ static void test_huge_tile_count_throws() {
     p.dram_bandwidth_bytes_per_cycle = 18446744073709551615ULL; // UINT64_MAX — instant
     p.compute_ops_per_cycle = 18446744073709551615ULL;          // UINT64_MAX — instant
     CHECK_THROWS(std::overflow_error, run_simulation(p, "row_stationary"));
+    CHECK_THROWS(std::overflow_error, run_simulation(p, "input_stationary"));
 
     HardwareParams p2;
     p2.matrix_m = 3163; p2.matrix_n = 3163; p2.matrix_k = 1; // 3163^2 = 10,004,569 > 10M
@@ -339,6 +384,7 @@ static void test_large_dim_overflow_throws() {
     p.scratchpad_bytes = 64ULL * 1024 * 1024 * 1024; // 64 GB, not the constraint
     CHECK_THROWS(std::overflow_error, run_simulation(p, "row_stationary"));
     CHECK_THROWS(std::overflow_error, run_simulation(p, "output_stationary"));
+    CHECK_THROWS(std::overflow_error, run_simulation(p, "input_stationary"));
     CHECK_THROWS(std::overflow_error, run_simulation(p, "double_buffer"));
 }
 
@@ -347,6 +393,8 @@ int main() {
     test_cycle_accounting_invariant();
     test_utilization_range();
     test_row_output_same_operations();
+    test_input_row_symmetric();
+    test_input_stationary_reuses_b();
     test_double_buffer_prefetch_reduces_cycles();
     test_double_buffer_fewer_stalls();
     test_zero_k_all_zero_metrics();

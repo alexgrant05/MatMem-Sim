@@ -146,6 +146,46 @@ std::vector<TileWork> build_output_stationary(const HardwareParams& p_in) {
     return work;
 }
 
+// Input stationary: B(ki,ni) stays resident across all mi; A and C stream.
+// Loop order ni -> ki -> mi is the mirror of row stationary (mi -> ki -> ni)
+// under the M<->N / A<->B symmetry.
+std::vector<TileWork> build_input_stationary(const HardwareParams& p_in) {
+    const auto p = apply_auto_tile(p_in, 1);
+    std::vector<TileWork> work;
+    const auto mt = ceil_div(p.matrix_m, p.tile_m);
+    const auto nt = ceil_div(p.matrix_n, p.tile_n);
+    const auto kt = ceil_div(p.matrix_k, p.tile_k);
+
+    if (mt == 0 || nt == 0 || kt == 0) return work;
+
+    const auto tile_count = safe_mul(safe_mul(mt, nt), kt);
+    if (tile_count > MAX_TILE_COUNT) {
+        throw std::overflow_error(
+            "input_stationary tile count " + std::to_string(tile_count) +
+            " exceeds limit " + std::to_string(MAX_TILE_COUNT));
+    }
+    work.reserve(static_cast<std::size_t>(tile_count));
+
+    for (std::uint64_t ni = 0; ni < nt; ++ni) {
+        const auto n = std::min(p.tile_n, p.matrix_n - ni * p.tile_n);
+        for (std::uint64_t ki = 0; ki < kt; ++ki) {
+            const auto k = std::min(p.tile_k, p.matrix_k - ki * p.tile_k);
+            const auto b_bytes = safe_mul(safe_mul(k, n), p.element_bytes);
+            for (std::uint64_t mi = 0; mi < mt; ++mi) {
+                const auto m = std::min(p.tile_m, p.matrix_m - mi * p.tile_m);
+                const auto a_bytes = safe_mul(safe_mul(m, k), p.element_bytes);
+                const auto c_bytes = safe_mul(safe_mul(m, n), p.element_bytes);
+                // Scratchpad peak: B stays resident + current A + C
+                const auto sp_bytes = safe_add(safe_add(b_bytes, a_bytes), c_bytes);
+                // B(ki,ni) stays resident across all mi; only reload it on the first mi
+                const auto load = safe_add(safe_add(mi == 0 ? b_bytes : std::uint64_t(0), a_bytes), c_bytes);
+                work.push_back({load, c_bytes, safe_mul(safe_mul(safe_mul(2ULL, m), n), k), sp_bytes});
+            }
+        }
+    }
+    return work;
+}
+
 } // namespace
 
 SequentialTilingEngine::SequentialTilingEngine(HardwareParams params, std::vector<TileWork> work)
@@ -232,6 +272,13 @@ OutputStationaryEngine::OutputStationaryEngine(const HardwareParams& params)
 
 std::string OutputStationaryEngine::name() const {
     return "output_stationary";
+}
+
+InputStationaryEngine::InputStationaryEngine(const HardwareParams& params)
+    : SequentialTilingEngine(params, build_input_stationary(params)) {}
+
+std::string InputStationaryEngine::name() const {
+    return "input_stationary";
 }
 
 DoubleBufferEngine::DoubleBufferEngine(const HardwareParams& params)
@@ -341,6 +388,9 @@ std::unique_ptr<TilingEngine> make_strategy(const std::string& name, const Hardw
     }
     if (name == "output_stationary") {
         return std::make_unique<OutputStationaryEngine>(params);
+    }
+    if (name == "input_stationary") {
+        return std::make_unique<InputStationaryEngine>(params);
     }
     if (name == "double_buffer") {
         return std::make_unique<DoubleBufferEngine>(params);

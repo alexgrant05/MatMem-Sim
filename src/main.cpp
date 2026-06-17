@@ -64,7 +64,7 @@ EnergyResult compute_energy(const HardwareParams& p, const Metrics& m) {
 void print_usage() {
     std::cout <<
         "usage: matmem-sim\n"
-        "  [--strategy row_stationary|output_stationary|double_buffer]\n"
+        "  [--strategy row_stationary|output_stationary|input_stationary|double_buffer]\n"
         "  [--scratchpad-kb N]      scratchpad capacity in KB (default 32)\n"
         "  [--dram-latency N]       DRAM round-trip latency in cycles (default 100)\n"
         "  [--bandwidth N]          DRAM bandwidth in bytes/cycle (default 32)\n"

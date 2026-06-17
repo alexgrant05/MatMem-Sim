@@ -59,6 +59,12 @@ public:
     std::string name() const override;
 };
 
+class InputStationaryEngine final : public SequentialTilingEngine {
+public:
+    explicit InputStationaryEngine(const HardwareParams& params);
+    std::string name() const override;
+};
+
 class DoubleBufferEngine final : public TilingEngine {
 public:
     explicit DoubleBufferEngine(const HardwareParams& params);
