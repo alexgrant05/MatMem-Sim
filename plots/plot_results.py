@@ -15,6 +15,28 @@ import pandas as pd
 REF_LATENCY = 100
 REF_BANDWIDTH = 32
 
+# Per-strategy line styles. On a square problem input_stationary coincides
+# exactly with row_stationary (M<->N symmetry), so it is drawn last with a
+# dashed line and distinct marker — otherwise the solid row line drawn on top
+# would hide it completely in the overlay plots.
+STYLES = {
+    "row_stationary":    dict(linestyle="-", marker="o"),
+    "output_stationary": dict(linestyle="-", marker="s"),
+    "double_buffer":     dict(linestyle="-", marker="^"),
+    "input_stationary":  dict(linestyle="--", marker="x", linewidth=2),
+}
+DEFAULT_STYLE = dict(linestyle="-", marker="o")
+# Draw order for overlay plots: input_stationary last so it sits on top.
+DRAW_ORDER = ["row_stationary", "output_stationary", "double_buffer", "input_stationary"]
+
+
+def overlay_groups(frame):
+    """Yield (strategy, group) in DRAW_ORDER, with any unknown strategies last."""
+    known = [s for s in DRAW_ORDER if s in set(frame["strategy"])]
+    extra = [s for s in frame["strategy"].unique() if s not in DRAW_ORDER]
+    for strategy in known + extra:
+        yield strategy, frame[frame["strategy"] == strategy]
+
 
 def main() -> None:
     csv_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("results/sweep.csv")
@@ -34,9 +56,9 @@ def main() -> None:
     ai_range = [ref["arithmetic_intensity"].min() * 0.8,
                 ref["arithmetic_intensity"].max() * 1.2]
 
-    for strategy, group in ref.groupby("strategy"):
+    for strategy, group in overlay_groups(ref):
         plt.plot(group["arithmetic_intensity"], group["effective_ops_per_cycle"],
-                 marker="o", label=strategy)
+                 label=strategy, **STYLES.get(strategy, DEFAULT_STYLE))
 
     ai_vals = pd.Series(ai_range)
     plt.plot(ai_vals, ai_vals * REF_BANDWIDTH, "k--", linewidth=1,
@@ -54,9 +76,9 @@ def main() -> None:
 
     # ── Plot 2: Scratchpad Pareto ─────────────────────────────────────────────
     plt.figure(figsize=(8, 5))
-    for strategy, group in ref.groupby("strategy"):
+    for strategy, group in overlay_groups(ref):
         plt.plot(group["scratchpad_kb"], group["compute_utilization"],
-                 marker="o", label=strategy)
+                 label=strategy, **STYLES.get(strategy, DEFAULT_STYLE))
     plt.xlabel("Scratchpad size (KB)")
     plt.ylabel("Compute utilization")
     plt.title(f"Scratchpad Pareto — latency {REF_LATENCY} cyc, bandwidth {REF_BANDWIDTH} B/cyc")
@@ -126,9 +148,9 @@ def main() -> None:
 
     # ── Plot 6: Energy efficiency ─────────────────────────────────────────────
     plt.figure(figsize=(8, 5))
-    for strategy, group in ref.groupby("strategy"):
+    for strategy, group in overlay_groups(ref):
         plt.plot(group["scratchpad_kb"], group["ops_per_pj"],
-                 marker="o", label=strategy)
+                 label=strategy, **STYLES.get(strategy, DEFAULT_STYLE))
     plt.xlabel("Scratchpad size (KB)")
     plt.ylabel("Energy efficiency (ops/pJ)")
     plt.title(f"Energy efficiency — latency {REF_LATENCY} cyc, bandwidth {REF_BANDWIDTH} B/cyc")
