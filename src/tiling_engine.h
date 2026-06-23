@@ -22,12 +22,28 @@ struct TileWork {
     std::uint64_t resident_bytes = 0;
 };
 
+// Per-tile phase record produced by --trace.
+// Ranges are half-open: phase X runs on cycles [X_start, X_end).
+// For double buffer, phase intervals may overlap other tiles' intervals.
+// end is the scheduling boundary for the next tile and can precede store_end
+// when a writeback is hidden under successor compute.
+struct TraceRecord {
+    std::uint64_t load_start    = 0;
+    std::uint64_t load_end      = 0;
+    std::uint64_t compute_start = 0;
+    std::uint64_t compute_end   = 0;
+    std::uint64_t store_start   = 0;
+    std::uint64_t store_end     = 0;
+    std::uint64_t end           = 0; // first cycle of next tile (exclusive)
+};
+
 class TilingEngine {
 public:
     virtual ~TilingEngine() = default;
     virtual std::string name() const = 0;
     virtual void tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& metrics) = 0;
     virtual bool done() const = 0;
+    virtual const std::vector<TraceRecord>& trace() const = 0;
 };
 
 class SequentialTilingEngine : public TilingEngine {
@@ -36,6 +52,7 @@ public:
 
     void tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& metrics) override;
     bool done() const override;
+    const std::vector<TraceRecord>& trace() const override;
 
 protected:
     HardwareParams params_;
@@ -45,6 +62,15 @@ protected:
     bool store_issued_ = false;
     bool compute_started_ = false;
     std::uint64_t compute_remaining_ = 0;
+
+private:
+    std::vector<TraceRecord> traces_;
+    std::uint64_t trace_load_start_    = 0;
+    std::uint64_t trace_load_end_      = 0;
+    std::uint64_t trace_compute_start_ = 0;
+    std::uint64_t trace_compute_end_   = 0;
+    std::uint64_t trace_store_start_   = 0;
+    std::uint64_t trace_store_end_     = 0;
 };
 
 class RowStationaryEngine final : public SequentialTilingEngine {
@@ -72,6 +98,7 @@ public:
     std::string name() const override;
     void tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& metrics) override;
     bool done() const override;
+    const std::vector<TraceRecord>& trace() const override;
 
 private:
     // Ticks DRAM one cycle and ages the outstanding-load countdowns with it.
@@ -88,6 +115,18 @@ private:
     std::uint64_t cur_load_remaining_ = 0;
     // Cycles until the prefetched next tile's load completes.
     std::uint64_t next_load_remaining_ = 0;
+
+    // Trace state
+    std::vector<TraceRecord> traces_;
+    std::uint64_t cur_load_start_      = 0;
+    std::uint64_t cur_load_end_        = 0;
+    std::uint64_t next_load_start_     = 0;
+    std::uint64_t next_load_end_       = 0;
+    std::uint64_t cur_compute_start_   = 0;
+    std::uint64_t cur_compute_end_     = 0;
+    std::uint64_t cur_store_start_     = 0;
+    std::uint64_t cur_store_end_       = 0;
+    bool          cur_compute_recorded_ = false;
 };
 
 std::unique_ptr<TilingEngine> make_strategy(const std::string& name, const HardwareParams& params);

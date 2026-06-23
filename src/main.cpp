@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -75,7 +76,8 @@ void print_usage() {
         "  [--tile-m N]             tile M size, 0 = auto (default 0)\n"
         "  [--tile-n N]             tile N size, 0 = auto (default 0)\n"
         "  [--tile-k N]             tile K size, 0 = auto (default 0)\n"
-        "  [--csv]                  emit CSV row instead of human-readable output\n";
+        "  [--csv]                  emit CSV row instead of human-readable output\n"
+        "  [--trace]                print per-tile Gantt (load/compute/store cycle ranges)\n";
 }
 
 } // namespace
@@ -84,6 +86,7 @@ int main(int argc, char** argv) {
     HardwareParams params;
     std::string strategy = "row_stationary";
     bool csv = false;
+    bool trace = false;
 
     try {
         for (int i = 1; i < argc; ++i) {
@@ -116,6 +119,8 @@ int main(int argc, char** argv) {
                 params.tile_k = parse_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--csv") {
                 csv = true;
+            } else if (arg == "--trace") {
+                trace = true;
             } else if (arg == "--help" || arg == "-h") {
                 print_usage();
                 return 0;
@@ -124,7 +129,8 @@ int main(int argc, char** argv) {
             }
         }
 
-        const auto metrics = run_simulation(params, strategy);
+        std::vector<TraceRecord> trace_records;
+        const auto metrics = run_simulation(params, strategy, trace ? &trace_records : nullptr);
         const auto energy = compute_energy(params, metrics);
 
         if (csv) {
@@ -162,6 +168,16 @@ int main(int argc, char** argv) {
             std::cout << "effective_ops_per_cycle: " << metrics.effective_ops_per_cycle() << '\n';
             std::cout << "energy_pj: " << energy.energy_pj << '\n';
             std::cout << "ops_per_pj: " << energy.ops_per_pj << '\n';
+        }
+        if (trace) {
+            std::cout << '\n';
+            for (std::size_t i = 0; i < trace_records.size(); ++i) {
+                const auto& r = trace_records[i];
+                std::cout << "tile " << std::setw(6) << i
+                          << ": load=[" << r.load_start << ',' << r.load_end << ')'
+                          << " compute=[" << r.compute_start << ',' << r.compute_end << ')'
+                          << " store=[" << r.store_start << ',' << r.store_end << ")\n";
+            }
         }
     } catch (const std::exception& ex) {
         std::cerr << "error: " << ex.what() << '\n';

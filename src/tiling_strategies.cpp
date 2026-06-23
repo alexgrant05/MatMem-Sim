@@ -34,6 +34,25 @@ std::uint64_t safe_add(std::uint64_t a, std::uint64_t b) {
     return a + b;
 }
 
+struct RequestTrace {
+    std::uint64_t start = 0;
+    std::uint64_t end = 0;
+    std::uint64_t remaining = 0;
+};
+
+RequestTrace issue_traced_request(DRAMModel& dram, std::uint64_t bytes, std::uint64_t now) {
+    if (bytes == 0) {
+        return {now, now, 0};
+    }
+
+    const auto backlog_before = dram.backlog_cycles();
+    const auto start = safe_add(now, backlog_before);
+    dram.request(bytes);
+    const auto remaining = dram.backlog_cycles();
+    const auto end = safe_add(now, remaining);
+    return {start, end, remaining};
+}
+
 // Maximum work items materialised per strategy to prevent OOM.
 // 10M tiles × 32 bytes = 320 MB ceiling.
 static constexpr std::uint64_t MAX_TILE_COUNT = 10'000'000;
@@ -84,19 +103,49 @@ std::vector<TileWork> build_row_stationary(const HardwareParams& p_in) {
 
     for (std::uint64_t mi = 0; mi < mt; ++mi) {
         const auto m = std::min(p.tile_m, p.matrix_m - mi * p.tile_m);
-        for (std::uint64_t ki = 0; ki < kt; ++ki) {
-            const auto k = std::min(p.tile_k, p.matrix_k - ki * p.tile_k);
-            const auto a_bytes = safe_mul(safe_mul(m, k), p.element_bytes);
-            for (std::uint64_t ni = 0; ni < nt; ++ni) {
-                const auto n = std::min(p.tile_n, p.matrix_n - ni * p.tile_n);
-                const auto b_bytes = safe_mul(safe_mul(k, n), p.element_bytes);
+        std::uint64_t group_start = 0;
+        while (group_start < nt) {
+            const auto k_cap = std::min(p.tile_k, p.matrix_k);
+            const auto a_cap_bytes = safe_mul(safe_mul(m, k_cap), p.element_bytes);
+            std::uint64_t group_c_bytes = 0;
+            std::uint64_t group_max_b_bytes = 0;
+            std::uint64_t group_end = group_start;
+
+            while (group_end < nt) {
+                const auto n = std::min(p.tile_n, p.matrix_n - group_end * p.tile_n);
                 const auto c_bytes = safe_mul(safe_mul(m, n), p.element_bytes);
-                // Scratchpad peak: A stays resident + current B + C
-                const auto sp_bytes = safe_add(safe_add(a_bytes, b_bytes), c_bytes);
-                // A(mi,ki) stays resident across all ni; only reload it on the first ni
-                const auto load = safe_add(safe_add(ni == 0 ? a_bytes : std::uint64_t(0), b_bytes), c_bytes);
-                work.push_back({load, c_bytes, safe_mul(safe_mul(safe_mul(2ULL, m), n), k), sp_bytes});
+                const auto b_bytes = safe_mul(safe_mul(k_cap, n), p.element_bytes);
+                const auto candidate_c = safe_add(group_c_bytes, c_bytes);
+                const auto candidate_max_b = std::max(group_max_b_bytes, b_bytes);
+                const auto candidate_sp = safe_add(safe_add(candidate_c, a_cap_bytes), candidate_max_b);
+                if (candidate_sp > p.scratchpad_bytes && group_end > group_start) {
+                    break;
+                }
+                group_c_bytes = candidate_c;
+                group_max_b_bytes = candidate_max_b;
+                ++group_end;
+                if (candidate_sp > p.scratchpad_bytes) {
+                    break;
+                }
             }
+
+            for (std::uint64_t ki = 0; ki < kt; ++ki) {
+                const auto k = std::min(p.tile_k, p.matrix_k - ki * p.tile_k);
+                const auto a_bytes = safe_mul(safe_mul(m, k), p.element_bytes);
+                for (std::uint64_t ni = group_start; ni < group_end; ++ni) {
+                    const auto n = std::min(p.tile_n, p.matrix_n - ni * p.tile_n);
+                    const auto b_bytes = safe_mul(safe_mul(k, n), p.element_bytes);
+                    const auto c_bytes = safe_mul(safe_mul(m, n), p.element_bytes);
+                    const auto sp_bytes = safe_add(safe_add(group_c_bytes, a_bytes), b_bytes);
+                    const auto load_a = (ni == group_start) ? a_bytes : std::uint64_t(0);
+                    const auto load_c = (ki == 0) ? c_bytes : std::uint64_t(0);
+                    const auto load = safe_add(safe_add(load_a, b_bytes), load_c);
+                    const auto store = (ki == kt - 1) ? c_bytes : std::uint64_t(0);
+                    work.push_back({load, store, safe_mul(safe_mul(safe_mul(2ULL, m), n), k), sp_bytes});
+                }
+            }
+
+            group_start = group_end;
         }
     }
     return work;
@@ -146,9 +195,8 @@ std::vector<TileWork> build_output_stationary(const HardwareParams& p_in) {
     return work;
 }
 
-// Input stationary: B(ki,ni) stays resident across all mi; A and C stream.
-// Loop order ni -> ki -> mi is the mirror of row stationary (mi -> ki -> ni)
-// under the M<->N / A<->B symmetry.
+// Input stationary: A(mi,ki), the activation/input tile, stays resident across
+// all ni; B and C stream across the N dimension.
 std::vector<TileWork> build_input_stationary(const HardwareParams& p_in) {
     const auto p = apply_auto_tile(p_in, 1);
     std::vector<TileWork> work;
@@ -166,19 +214,17 @@ std::vector<TileWork> build_input_stationary(const HardwareParams& p_in) {
     }
     work.reserve(static_cast<std::size_t>(tile_count));
 
-    for (std::uint64_t ni = 0; ni < nt; ++ni) {
-        const auto n = std::min(p.tile_n, p.matrix_n - ni * p.tile_n);
+    for (std::uint64_t mi = 0; mi < mt; ++mi) {
+        const auto m = std::min(p.tile_m, p.matrix_m - mi * p.tile_m);
         for (std::uint64_t ki = 0; ki < kt; ++ki) {
             const auto k = std::min(p.tile_k, p.matrix_k - ki * p.tile_k);
-            const auto b_bytes = safe_mul(safe_mul(k, n), p.element_bytes);
-            for (std::uint64_t mi = 0; mi < mt; ++mi) {
-                const auto m = std::min(p.tile_m, p.matrix_m - mi * p.tile_m);
-                const auto a_bytes = safe_mul(safe_mul(m, k), p.element_bytes);
+            const auto a_bytes = safe_mul(safe_mul(m, k), p.element_bytes);
+            for (std::uint64_t ni = 0; ni < nt; ++ni) {
+                const auto n = std::min(p.tile_n, p.matrix_n - ni * p.tile_n);
+                const auto b_bytes = safe_mul(safe_mul(k, n), p.element_bytes);
                 const auto c_bytes = safe_mul(safe_mul(m, n), p.element_bytes);
-                // Scratchpad peak: B stays resident + current A + C
-                const auto sp_bytes = safe_add(safe_add(b_bytes, a_bytes), c_bytes);
-                // B(ki,ni) stays resident across all mi; only reload it on the first mi
-                const auto load = safe_add(safe_add(mi == 0 ? b_bytes : std::uint64_t(0), a_bytes), c_bytes);
+                const auto sp_bytes = safe_add(safe_add(a_bytes, b_bytes), c_bytes);
+                const auto load = safe_add(safe_add(ni == 0 ? a_bytes : std::uint64_t(0), b_bytes), c_bytes);
                 work.push_back({load, c_bytes, safe_mul(safe_mul(safe_mul(2ULL, m), n), k), sp_bytes});
             }
         }
@@ -213,7 +259,9 @@ void SequentialTilingEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metri
     }
 
     if (!load_issued_) {
-        dram.request(tile.load_bytes);
+        const auto load_trace = issue_traced_request(dram, tile.load_bytes, metrics.total_cycles);
+        trace_load_start_ = load_trace.start;
+        trace_load_end_ = load_trace.end;
         load_issued_ = true;
     }
 
@@ -225,6 +273,7 @@ void SequentialTilingEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metri
     }
 
     if (!compute_started_) {
+        trace_compute_start_ = metrics.total_cycles;
         compute_remaining_ = compute_cycles(params_, tile.operations);
         metrics.operations = safe_add(metrics.operations, tile.operations);
         compute_started_ = true;
@@ -239,7 +288,10 @@ void SequentialTilingEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metri
     }
 
     if (!store_issued_) {
-        dram.request(tile.store_bytes);
+        trace_compute_end_ = metrics.total_cycles;
+        const auto store_trace = issue_traced_request(dram, tile.store_bytes, metrics.total_cycles);
+        trace_store_start_ = store_trace.start;
+        trace_store_end_ = store_trace.end;
         store_issued_ = true;
     }
 
@@ -250,6 +302,9 @@ void SequentialTilingEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metri
         return;
     }
 
+    traces_.push_back({trace_load_start_, trace_load_end_, trace_compute_start_,
+                       trace_compute_end_, trace_store_start_, trace_store_end_,
+                       metrics.total_cycles});
     ++index_;
     load_issued_ = false;
     store_issued_ = false;
@@ -258,6 +313,10 @@ void SequentialTilingEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metri
 
 bool SequentialTilingEngine::done() const {
     return index_ >= work_.size();
+}
+
+const std::vector<TraceRecord>& SequentialTilingEngine::trace() const {
+    return traces_;
 }
 
 RowStationaryEngine::RowStationaryEngine(const HardwareParams& params)
@@ -317,8 +376,10 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
 
     if (!current_ready_) {
         if (prefetched_index_ == index_) {
-            dram.request(tile.load_bytes);
-            cur_load_remaining_ = dram.backlog_cycles();
+            const auto load_trace = issue_traced_request(dram, tile.load_bytes, metrics.total_cycles);
+            cur_load_start_ = load_trace.start;
+            cur_load_end_ = load_trace.end;
+            cur_load_remaining_ = load_trace.remaining;
             ++prefetched_index_;
         }
         // Wait for *this tile's* load to finish, not for the whole DRAM queue:
@@ -351,12 +412,19 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
 
     if (prefetched_index_ == index_ + 1 && prefetched_index_ < work_.size() &&
         scratchpad.can_hold(combined_sp)) {
-        dram.request(work_[prefetched_index_].load_bytes);
-        next_load_remaining_ = dram.backlog_cycles();
+        const auto load_trace = issue_traced_request(dram, work_[prefetched_index_].load_bytes,
+                                                     metrics.total_cycles);
+        next_load_start_ = load_trace.start;
+        next_load_end_ = load_trace.end;
+        next_load_remaining_ = load_trace.remaining;
         ++prefetched_index_;
     }
 
     if (compute_remaining_ > 0) {
+        if (!cur_compute_recorded_) {
+            cur_compute_start_ = metrics.total_cycles;
+            cur_compute_recorded_ = true;
+        }
         --compute_remaining_;
         metrics.compute_cycles++;
         tick_dram(dram);
@@ -365,7 +433,10 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
     }
 
     if (!current_store_issued_) {
-        dram.request(tile.store_bytes);
+        cur_compute_end_ = metrics.total_cycles;
+        const auto store_trace = issue_traced_request(dram, tile.store_bytes, metrics.total_cycles);
+        cur_store_start_ = store_trace.start;
+        cur_store_end_ = store_trace.end;
         current_store_issued_ = true;
     }
 
@@ -380,12 +451,24 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
         return;
     }
 
+    traces_.push_back({cur_load_start_, cur_load_end_, cur_compute_start_,
+                       cur_compute_end_, cur_store_start_, cur_store_end_,
+                       metrics.total_cycles});
     ++index_;
     current_store_issued_ = false;
     // The prefetched next tile inherits its outstanding load countdown; it is
     // only ready to compute once that load has actually completed (== 0).
     cur_load_remaining_ = next_load_remaining_;
     next_load_remaining_ = 0;
+    cur_load_start_       = next_load_start_;
+    cur_load_end_         = next_load_end_;
+    next_load_start_      = 0;
+    next_load_end_        = 0;
+    cur_compute_start_    = 0;
+    cur_compute_end_      = 0;
+    cur_store_start_      = 0;
+    cur_store_end_        = 0;
+    cur_compute_recorded_ = false;
     current_ready_ = (index_ < work_.size()) && (prefetched_index_ > index_) &&
                      (cur_load_remaining_ == 0);
     if (current_ready_) {
@@ -396,6 +479,10 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
 
 bool DoubleBufferEngine::done() const {
     return index_ >= work_.size();
+}
+
+const std::vector<TraceRecord>& DoubleBufferEngine::trace() const {
+    return traces_;
 }
 
 std::unique_ptr<TilingEngine> make_strategy(const std::string& name, const HardwareParams& params) {

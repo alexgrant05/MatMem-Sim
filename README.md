@@ -15,9 +15,9 @@ It models:
 - Fixed-latency, bandwidth-limited DRAM requests
 - Finite scratchpad capacity with automatic tile-size selection
 - Matrix multiply compute throughput
-- Three tiling strategies: row stationary, output stationary, and double buffering
+- Four tiling strategies: row stationary, output stationary, input stationary, and double buffering
 - Parameter sweeps over scratchpad size, DRAM latency, and bandwidth
-- CSV output and plotting scripts (roofline, Pareto, stall breakdown, latency sensitivity)
+- CSV output, per-tile traces, and plotting scripts (roofline, Pareto, stall breakdown, latency sensitivity, Gantt)
 
 It does not model RTL, FPGA implementation, multithreading, cache coherence, full DRAM timing standards, or neural network framework integration.
 
@@ -52,7 +52,7 @@ On multi-config generators (Visual Studio) the executable is at `.\build\Debug\m
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--strategy` | `row_stationary` | `row_stationary`, `output_stationary`, `double_buffer` |
+| `--strategy` | `row_stationary` | `row_stationary`, `output_stationary`, `input_stationary`, `double_buffer` |
 | `--scratchpad-kb N` | `32` | Scratchpad capacity in KB |
 | `--dram-latency N` | `100` | DRAM round-trip latency in cycles |
 | `--bandwidth N` | `32` | DRAM bandwidth in bytes/cycle |
@@ -60,12 +60,13 @@ On multi-config generators (Visual Studio) the executable is at `.\build\Debug\m
 | `--matrix-m/n/k N` | `256` | Matrix dimensions |
 | `--tile-m/n/k N` | `0` | Tile dimensions; `0` = auto-size to scratchpad |
 | `--csv` | off | Emit a single CSV row instead of human-readable output |
+| `--trace` | off | Print per-tile load, compute, and store ranges for Gantt plots |
 
 ### Auto tile sizing
 
 When `--tile-m/n/k` are left at `0` (the default), the simulator picks the largest square tile that fits in the scratchpad given the strategy's buffer requirements:
 
-- Row stationary and output stationary: one tile must fit (A + B + C = 3t²·elem ≤ scratchpad)
+- Row stationary, output stationary, and input stationary: one tile must fit (A + B + C = 3t²·elem ≤ scratchpad)
 - Double buffering: two tiles must fit simultaneously (6t²·elem ≤ scratchpad)
 
 This means larger scratchpads use larger tiles, which is what makes the Pareto plots meaningful.
@@ -77,7 +78,7 @@ python scripts\run_sweep.py
 python plots\plot_results.py results\sweep.csv
 ```
 
-The default sweep covers 3 strategies × 6 scratchpad sizes × 3 DRAM latencies × 4 bandwidths = **216 simulations**. Pass `--matrix-m/n/k` to the sweep script to change matrix dimensions.
+The default sweep covers 4 strategies × 6 scratchpad sizes × 3 DRAM latencies × 4 bandwidths = **288 simulations**. Pass `--matrix-m/n/k` to the sweep script to change matrix dimensions.
 
 The plot script generates six figures in `results/`:
 
@@ -125,9 +126,11 @@ Key finding: **double buffering improves compute utilization but often reduces e
 
 ## Tiling Strategies
 
-**Row stationary** — keeps tile A(mi, ki) resident in the scratchpad and streams B and C across the N dimension. Loop order: `for mi → for ki → for ni`. A is loaded once per (mi, ki) pair.
+**Row stationary** — keeps a row stripe of output C tiles resident across K while reusing A across the N tiles in that stripe. This reduces intermediate C traffic and makes the row schedule distinct from pure input reuse.
 
 **Output stationary** — keeps tile C(mi, ni) resident and accumulates partial sums across all K tiles without writing C back to DRAM between k-iterations. Minimises C traffic at the cost of streaming A and B every k-step.
+
+**Input stationary** — keeps tile A(mi, ki), the input/activation tile, resident while streaming B and C across the N dimension. C is loaded and stored for each tile because this strategy does not retain output partial sums across K.
 
 **Double buffering** — uses output stationary tile ordering but prefetches the next tile's data from DRAM while the current tile is computing. Requires the scratchpad to hold two tiles simultaneously. When the scratchpad is too small for two tiles, it falls back to sequential output stationary behaviour.
 
@@ -135,4 +138,4 @@ Key finding: **double buffering improves compute utilization but often reduces e
 
 Double buffering only improves utilization when the scratchpad can hold two working tiles at once. With auto tile sizing, the double buffer strategy automatically sizes its tiles to half the scratchpad so prefetching is always active.
 
-Row stationary minimises A DRAM traffic but reloads C on every k-iteration, making output stationary generally better for square matrices. Row stationary becomes competitive when the N dimension is large relative to K, amortising A loads over many output columns.
+Row stationary reduces intermediate C traffic by holding a row stripe of outputs across K. Input stationary instead focuses on activation reuse, so its Gantt charts should show A reuse but more frequent C traffic than row stationary.

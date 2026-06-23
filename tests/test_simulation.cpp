@@ -4,6 +4,7 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
 int g_failures = 0;
 
@@ -64,32 +65,34 @@ static void test_row_output_same_operations() {
     CHECK(row.operations == in.operations);
 }
 
-// ── Input stationary is the M<->N mirror of row stationary ─────────────────
-// Row stationary keeps A(mi,ki) resident across ni; input stationary keeps
-// B(ki,ni) resident across mi. On a square symmetric problem (M=N=K) with a
-// square tile, swapping M<->N and A<->B maps one schedule exactly onto the
-// other, so total DRAM bytes and total cycles must match.
-static void test_input_row_symmetric() {
+// Row stationary keeps a C row stripe resident across K tiles.
+static void test_row_stationary_c_row_stripe() {
     HardwareParams p;
-    p.matrix_m = p.matrix_n = p.matrix_k = 128;
+    p.matrix_m = 128; p.matrix_n = 64; p.matrix_k = 64;
     p.tile_m = p.tile_n = p.tile_k = 32;
     p.scratchpad_bytes = 64 * 1024;
 
-    const auto row = run_simulation(p, "row_stationary");
+    std::vector<TraceRecord> trace;
+    const auto row = run_simulation(p, "row_stationary", &trace);
     const auto in = run_simulation(p, "input_stationary");
 
-    CHECK(in.operations == row.operations);
-    CHECK(in.dram_bytes == row.dram_bytes);
-    CHECK(in.total_cycles == row.total_cycles);
-    CHECK(in.compute_cycles + in.dram_stall_cycles == in.total_cycles);
+    const std::uint64_t mt = 128 / 32, nt = 64 / 32, kt = 64 / 32;
+    const std::uint64_t elem = 4, t = 32;
+    const std::uint64_t a_bytes = t * t * elem, b_bytes = t * t * elem, c_bytes = t * t * elem;
+    const std::uint64_t loads = mt * kt * a_bytes + mt * nt * kt * b_bytes + mt * nt * c_bytes;
+    const std::uint64_t stores = mt * nt * c_bytes;
+
+    CHECK(row.dram_bytes == loads + stores);
+    CHECK(row.dram_bytes < in.dram_bytes);
+    CHECK(trace.size() == mt * nt * kt);
+    CHECK(trace[0].store_start == trace[0].store_end);
+    CHECK(trace[1].store_start == trace[1].store_end);
+    CHECK(trace[2].store_end > trace[2].store_start);
+    CHECK(trace[3].store_end > trace[3].store_start);
 }
 
-// ── Input stationary reuses resident B across the m dimension ──────────────
-// With mt>1 tiles down M, B is loaded once per (ki,ni) and reused for every mi.
-// That reuse must make input stationary move strictly fewer DRAM bytes than a
-// schedule that reloaded B for every mi would. We verify it against the known
-// closed form: B is loaded exactly nt*kt times, not nt*kt*mt times.
-static void test_input_stationary_reuses_b() {
+// Input stationary reuses resident A/input activations across N tiles.
+static void test_input_stationary_reuses_a() {
     HardwareParams p;
     p.matrix_m = 128; p.matrix_n = 64; p.matrix_k = 64;
     p.tile_m = p.tile_n = p.tile_k = 32;
@@ -100,8 +103,7 @@ static void test_input_stationary_reuses_b() {
     const std::uint64_t mt = 128 / 32, nt = 64 / 32, kt = 64 / 32;
     const std::uint64_t elem = 4, t = 32;
     const std::uint64_t a_bytes = t * t * elem, b_bytes = t * t * elem, c_bytes = t * t * elem;
-    // A and C streamed for every (ni,ki,mi); B loaded only on mi==0; C stored each tile.
-    const std::uint64_t loads = mt * nt * kt * (a_bytes + c_bytes) + nt * kt * b_bytes;
+    const std::uint64_t loads = mt * kt * a_bytes + mt * nt * kt * (b_bytes + c_bytes);
     const std::uint64_t stores = mt * nt * kt * c_bytes;
     CHECK(in.dram_bytes == loads + stores);
 }
@@ -400,6 +402,95 @@ static void test_huge_k_count_throws() {
     CHECK_THROWS(std::overflow_error, run_simulation(p, "double_buffer"));
 }
 
+// ── Trace: phase ordering and exact single-tile values ────────────────────────
+// Single tile: 4×4×4 matrix with explicit 4×4×4 tile, row stationary.
+// element_bytes=4 (default), load = a+b+c = 3×64 = 192 B,
+// store = c = 64 B, ops = 2×4×4×4 = 128.
+// Default params: latency=100, bw=32, compute_ops=256.
+//   load_time  = 100 + ceil(192/32) = 106 → compute_start = 106
+//   compute    = ceil(128/256) = 1        → store_start   = 107
+//   store_time = 100 + ceil(64/32) = 102  → end           = 209
+static void test_trace_phase_ordering() {
+    HardwareParams p;
+    p.matrix_m = p.matrix_n = p.matrix_k = 4;
+    p.tile_m = p.tile_n = p.tile_k = 4;
+    p.scratchpad_bytes = 1024;
+
+    std::vector<TraceRecord> t;
+    const auto m = run_simulation(p, "row_stationary", &t);
+
+    CHECK(t.size() == 1);
+    CHECK(t[0].load_start    == 0);
+    CHECK(t[0].load_end      == 106);
+    CHECK(t[0].compute_start == 106);
+    CHECK(t[0].compute_end   == 107);
+    CHECK(t[0].store_start   == 107);
+    CHECK(t[0].store_end     == 209);
+    CHECK(t[0].end           == 209);
+    // sanity: total_cycles must match
+    CHECK(m.total_cycles == 209);
+
+    // Ordering invariant holds for every tile in a multi-tile run
+    std::vector<TraceRecord> t2;
+    run_simulation(small_matrix(), "row_stationary", &t2);
+    CHECK(!t2.empty());
+    for (const auto& r : t2) {
+        CHECK(r.load_start <= r.load_end);
+        CHECK(r.load_end <= r.compute_start);
+        CHECK(r.compute_start <= r.compute_end);
+        CHECK(r.compute_end <= r.store_start);
+        CHECK(r.store_start <= r.store_end);
+        CHECK(r.store_end == r.end);
+    }
+}
+
+// A prefetched double-buffer load can finish long before that tile is allowed
+// to compute. The trace must show the load's real completion cycle, not stretch
+// the load bar all the way to compute_start.
+static void test_double_buffer_trace_load_end() {
+    HardwareParams p;
+    p.matrix_m = 64; p.matrix_n = 128; p.matrix_k = 16;
+    p.tile_m = p.tile_n = 32; p.tile_k = 16;
+    p.scratchpad_bytes = 20 * 1024;
+    p.dram_latency_cycles = 0;
+    p.dram_bandwidth_bytes_per_cycle = 1;
+    p.compute_ops_per_cycle = 1;
+
+    std::vector<TraceRecord> t;
+    run_simulation(p, "double_buffer", &t);
+
+    CHECK(t.size() == 8);
+    CHECK(t[1].load_start == 8192);
+    CHECK(t[1].load_end == 16384);
+    CHECK(t[1].compute_start == 40960);
+    CHECK(t[1].load_end < t[1].compute_start);
+    CHECK(t[2].load_start == 45056);
+    CHECK(t[2].load_end == 53248);
+}
+
+// Non-final double-buffer stores are hidden under successor work, but they are
+// still real DRAM traffic. The Gantt trace must show their transfer interval
+// instead of collapsing them to a zero-width bar at the tile boundary.
+static void test_double_buffer_trace_store_overlap() {
+    HardwareParams p;
+    p.matrix_m = 64; p.matrix_n = 128; p.matrix_k = 16;
+    p.tile_m = p.tile_n = 32; p.tile_k = 16;
+    p.scratchpad_bytes = 20 * 1024;
+    p.dram_latency_cycles = 0;
+    p.dram_bandwidth_bytes_per_cycle = 1;
+    p.compute_ops_per_cycle = 1;
+
+    std::vector<TraceRecord> t;
+    run_simulation(p, "double_buffer", &t);
+
+    CHECK(t.size() == 8);
+    CHECK(t[0].compute_end == 40960);
+    CHECK(t[0].end == 40960);
+    CHECK(t[0].store_start == 40960);
+    CHECK(t[0].store_end == 45056);
+    CHECK(t[0].store_end > t[0].end);
+}
+
 static void test_large_dim_overflow_throws() {
     HardwareParams p;
     p.matrix_m = p.matrix_n = p.matrix_k = 4294967296ULL; // 2^32
@@ -416,8 +507,8 @@ int main() {
     test_cycle_accounting_invariant();
     test_utilization_range();
     test_row_output_same_operations();
-    test_input_row_symmetric();
-    test_input_stationary_reuses_b();
+    test_row_stationary_c_row_stripe();
+    test_input_stationary_reuses_a();
     test_double_buffer_prefetch_reduces_cycles();
     test_double_buffer_fewer_stalls();
     test_zero_k_all_zero_metrics();
@@ -428,6 +519,7 @@ int main() {
     test_oversized_tile_throws();
     test_large_dim_overflow_throws();
     test_tile_byte_addition_overflow_throws();
+    test_trace_phase_ordering();
     test_double_buffer_store_overlaps_with_compute();
     test_double_buffer_k_tile_prefetch_no_double_count();
     test_double_buffer_waits_for_prefetch_completion();
@@ -435,6 +527,8 @@ int main() {
     test_huge_tile_count_throws();
     test_huge_k_count_throws();
     test_compute_cycles_huge_ops_rounds_up();
+    test_double_buffer_trace_load_end();
+    test_double_buffer_trace_store_overlap();
 
     if (g_failures == 0) {
         std::cout << "test_simulation: all tests passed\n";

@@ -6,7 +6,8 @@
 
 #include <stdexcept>
 
-Metrics run_simulation(const HardwareParams& params, const std::string& strategy_name) {
+Metrics run_simulation(const HardwareParams& params, const std::string& strategy_name,
+                       std::vector<TraceRecord>* trace_out) {
     auto strategy = make_strategy(strategy_name, params);
     DRAMModel dram(params);
     Scratchpad scratchpad(params.scratchpad_bytes);
@@ -21,5 +22,8 @@ Metrics run_simulation(const HardwareParams& params, const std::string& strategy
     }
 
     metrics.dram_bytes = dram.bytes_transferred();
+    if (trace_out != nullptr) {
+        *trace_out = strategy->trace();
+    }
     return metrics;
 }
