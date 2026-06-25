@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+find_package(Python3 COMPONENTS Interpreter)
+
 add_library(matmem_core
     src/dram_model.cpp
     src/scratchpad.cpp
@@ -38,3 +40,8 @@ add_test(NAME test_simulation COMMAND test_simulation)
 add_executable(test_smoke tests/test_smoke.cpp)
 target_link_libraries(test_smoke PRIVATE matmem_core)
 add_test(NAME test_smoke COMMAND test_smoke)
+
+if(Python3_FOUND)
+    add_test(NAME test_cli_csv
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli_csv.py $<TARGET_FILE:matmem-sim>)
+endif()

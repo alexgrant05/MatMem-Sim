@@ -8,7 +8,7 @@ Core question:
 
 ## Scope
 
-This repository is scoped as a summer project (~8 weeks at ~8 hours per week).
+This repository is scoped as an ~8 week summer project summer learning project to explore memory system simulation, scratchpad tiling, accelerator dataflows, and performance/energy tradeoffs.
 
 It models:
 
@@ -19,7 +19,7 @@ It models:
 - Parameter sweeps over scratchpad size, DRAM latency, and bandwidth
 - CSV output, per-tile traces, and plotting scripts (roofline, Pareto, stall breakdown, latency sensitivity, Gantt)
 
-It does not model RTL, FPGA implementation, multithreading, cache coherence, full DRAM timing standards, or neural network framework integration.
+It does not model RTL behavior, FPGA implementation effects, multithreading, cache coherence, detailed DRAM timing standards, or integration with machine learning frameworks.
 
 ## Repository Layout
 
@@ -91,6 +91,18 @@ The plot script generates six figures in `results/`:
 | `bandwidth_sensitivity.png` | Compute utilization vs scratchpad at each DRAM bandwidth, one panel per strategy |
 | `energy_efficiency.png` | Energy efficiency (ops/pJ) vs scratchpad size per strategy |
 
+These sweep figures are committed so the repository includes a current visual snapshot of the simulator output.
+
+## Gantt Traces
+
+Gantt charts are generated separately from the sweep plots using the simulator's `--trace` output:
+
+```powershell
+python plots\plot_gantt.py
+```
+
+By default this writes one Gantt chart per strategy to `results/`. Use `--strategy`, `--matrix-m/n/k`, `--tile-m/n/k`, and `--max-tiles` to focus on a smaller case when comparing schedules.
+
 ## Metrics
 
 The simulator emits:
@@ -106,6 +118,11 @@ The simulator emits:
 | `effective_ops_per_cycle` | `operations / total_cycles` |
 | `energy_pj` | Total energy in picojoules: DRAM + SRAM + MAC (see energy model below) |
 | `ops_per_pj` | Energy efficiency: `operations / energy_pj` |
+| `a_reuse_factor` | Logical A tile demand divided by actual A DRAM load bytes |
+| `b_reuse_factor` | Logical B tile demand divided by actual B DRAM load bytes |
+| `c_reuse_factor` | Logical C tile demand divided by actual C DRAM load bytes |
+
+Reuse factors count loads only. C writebacks still contribute to `dram_bytes` and energy, but they are not included in `c_reuse_factor`.
 
 ## Energy Model
 
@@ -126,13 +143,13 @@ Key finding: **double buffering improves compute utilization but often reduces e
 
 ## Tiling Strategies
 
-**Row stationary** — keeps a row stripe of output C tiles resident across K while reusing A across the N tiles in that stripe. This reduces intermediate C traffic and makes the row schedule distinct from pure input reuse.
+**Row stationary**: keeps a row stripe of output C tiles resident across K while reusing A across the N tiles in that stripe. This reduces intermediate C traffic and makes the row schedule distinct from pure input reuse.
 
-**Output stationary** — keeps tile C(mi, ni) resident and accumulates partial sums across all K tiles without writing C back to DRAM between k-iterations. Minimises C traffic at the cost of streaming A and B every k-step.
+**Output stationary**: keeps tile C(mi, ni) resident and accumulates partial sums across all K tiles without writing C back to DRAM between k-iterations. Minimises C traffic at the cost of streaming A and B every k-step.
 
-**Input stationary** — keeps tile A(mi, ki), the input/activation tile, resident while streaming B and C across the N dimension. C is loaded and stored for each tile because this strategy does not retain output partial sums across K.
+**Input stationary**: keeps tile A(mi, ki), the input/activation tile, resident while streaming B and C across the N dimension. C is loaded and stored for each tile because this strategy does not retain output partial sums across K.
 
-**Double buffering** — uses output stationary tile ordering but prefetches the next tile's data from DRAM while the current tile is computing. Requires the scratchpad to hold two tiles simultaneously. When the scratchpad is too small for two tiles, it falls back to sequential output stationary behaviour.
+**Double buffering**: uses output stationary tile ordering but prefetches the next tile's data from DRAM while the current tile is computing. Requires the scratchpad to hold two tiles simultaneously. When the scratchpad is too small for two tiles, it falls back to sequential output stationary behaviour.
 
 ## Architecture Notes
 

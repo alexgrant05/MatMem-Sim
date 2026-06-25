@@ -138,7 +138,8 @@ int main(int argc, char** argv) {
                          "matrix_m,matrix_n,matrix_k,"
                          "total_cycles,compute_cycles,dram_stall_cycles,dram_bytes,"
                          "compute_utilization,arithmetic_intensity,effective_ops_per_cycle,"
-                         "energy_pj,ops_per_pj\n";
+                         "energy_pj,ops_per_pj,"
+                         "a_reuse_factor,b_reuse_factor,c_reuse_factor\n";
             std::cout << strategy << ','
                       << params.scratchpad_bytes / 1024 << ','
                       << params.dram_latency_cycles << ','
@@ -155,7 +156,10 @@ int main(int argc, char** argv) {
                       << metrics.arithmetic_intensity() << ','
                       << metrics.effective_ops_per_cycle() << ','
                       << energy.energy_pj << ','
-                      << energy.ops_per_pj << '\n';
+                      << energy.ops_per_pj << ','
+                      << metrics.a_reuse_factor() << ','
+                      << metrics.b_reuse_factor() << ','
+                      << metrics.c_reuse_factor() << '\n';
         } else {
             std::cout << std::fixed << std::setprecision(4);
             std::cout << "strategy: " << strategy << '\n';
@@ -168,6 +172,9 @@ int main(int argc, char** argv) {
             std::cout << "effective_ops_per_cycle: " << metrics.effective_ops_per_cycle() << '\n';
             std::cout << "energy_pj: " << energy.energy_pj << '\n';
             std::cout << "ops_per_pj: " << energy.ops_per_pj << '\n';
+            std::cout << "a_reuse_factor: " << metrics.a_reuse_factor() << '\n';
+            std::cout << "b_reuse_factor: " << metrics.b_reuse_factor() << '\n';
+            std::cout << "c_reuse_factor: " << metrics.c_reuse_factor() << '\n';
         }
         if (trace) {
             std::cout << '\n';

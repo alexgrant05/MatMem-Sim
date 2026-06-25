@@ -10,6 +10,9 @@ static void test_zero_guard() {
     CHECK_APPROX(m.compute_utilization(), 0.0, 1e-12);
     CHECK_APPROX(m.arithmetic_intensity(), 0.0, 1e-12);
     CHECK_APPROX(m.effective_ops_per_cycle(), 0.0, 1e-12);
+    CHECK_APPROX(m.a_reuse_factor(), 0.0, 1e-12);
+    CHECK_APPROX(m.b_reuse_factor(), 0.0, 1e-12);
+    CHECK_APPROX(m.c_reuse_factor(), 0.0, 1e-12);
 }
 
 static void test_compute_utilization() {
@@ -54,12 +57,27 @@ static void test_utilization_bounded() {
     CHECK(m.compute_utilization() >= 0.0);
 }
 
+static void test_reuse_factors() {
+    Metrics m;
+    m.a_demand_bytes = 4096;
+    m.a_load_bytes = 2048;
+    m.b_demand_bytes = 4096;
+    m.b_load_bytes = 4096;
+    m.c_demand_bytes = 8192;
+    m.c_load_bytes = 2048;
+
+    CHECK_APPROX(m.a_reuse_factor(), 2.0, 1e-9);
+    CHECK_APPROX(m.b_reuse_factor(), 1.0, 1e-9);
+    CHECK_APPROX(m.c_reuse_factor(), 4.0, 1e-9);
+}
+
 int main() {
     test_zero_guard();
     test_compute_utilization();
     test_arithmetic_intensity();
     test_effective_ops_per_cycle();
     test_utilization_bounded();
+    test_reuse_factors();
 
     if (g_failures == 0) {
         std::cout << "test_metrics: all tests passed\n";

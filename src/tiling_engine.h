@@ -16,6 +16,12 @@ struct TileWork {
     std::uint64_t store_bytes = 0;
     std::uint64_t operations = 0;
     std::uint64_t scratchpad_bytes = 0;
+    std::uint64_t a_load_bytes = 0;
+    std::uint64_t b_load_bytes = 0;
+    std::uint64_t c_load_bytes = 0;
+    std::uint64_t a_demand_bytes = 0;
+    std::uint64_t b_demand_bytes = 0;
+    std::uint64_t c_demand_bytes = 0;
     // Bytes already resident in the scratchpad from the previous tile (e.g. a
     // shared C tile across K-sub-tiles of the same output tile). The double-
     // buffer prefetch check subtracts these to avoid double-counting shared data.

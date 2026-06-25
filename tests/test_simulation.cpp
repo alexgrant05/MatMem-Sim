@@ -108,6 +108,30 @@ static void test_input_stationary_reuses_a() {
     CHECK(in.dram_bytes == loads + stores);
 }
 
+static void test_strategy_reuse_factors() {
+    HardwareParams p;
+    p.matrix_m = 128; p.matrix_n = 64; p.matrix_k = 64;
+    p.tile_m = p.tile_n = p.tile_k = 32;
+    p.scratchpad_bytes = 64 * 1024;
+
+    const auto row = run_simulation(p, "row_stationary");
+    const auto out = run_simulation(p, "output_stationary");
+    const auto in = run_simulation(p, "input_stationary");
+
+    CHECK_APPROX(in.a_reuse_factor(), 2.0, 1e-9);
+    CHECK_APPROX(in.b_reuse_factor(), 1.0, 1e-9);
+    CHECK_APPROX(in.c_reuse_factor(), 1.0, 1e-9);
+
+    CHECK_APPROX(row.a_reuse_factor(), 2.0, 1e-9);
+    CHECK_APPROX(row.b_reuse_factor(), 1.0, 1e-9);
+    CHECK_APPROX(row.c_reuse_factor(), 2.0, 1e-9);
+    CHECK(row.c_reuse_factor() > in.c_reuse_factor());
+
+    CHECK_APPROX(out.a_reuse_factor(), 1.0, 1e-9);
+    CHECK_APPROX(out.b_reuse_factor(), 1.0, 1e-9);
+    CHECK_APPROX(out.c_reuse_factor(), 2.0, 1e-9);
+}
+
 // ── 5. Double buffer prefetch isolates to fewer total cycles ──────────────
 // With an *explicit* tile size (same for both strategies), dram_bytes and
 // operations are identical. Double buffer's prefetch then reduces total_cycles.
@@ -509,6 +533,7 @@ int main() {
     test_row_output_same_operations();
     test_row_stationary_c_row_stripe();
     test_input_stationary_reuses_a();
+    test_strategy_reuse_factors();
     test_double_buffer_prefetch_reduces_cycles();
     test_double_buffer_fewer_stalls();
     test_zero_k_all_zero_metrics();

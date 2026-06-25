@@ -53,6 +53,27 @@ RequestTrace issue_traced_request(DRAMModel& dram, std::uint64_t bytes, std::uin
     return {start, end, remaining};
 }
 
+TileWork make_tile(std::uint64_t load_bytes, std::uint64_t store_bytes,
+                   std::uint64_t operations, std::uint64_t scratchpad_bytes,
+                   std::uint64_t a_load_bytes, std::uint64_t b_load_bytes,
+                   std::uint64_t c_load_bytes, std::uint64_t a_demand_bytes,
+                   std::uint64_t b_demand_bytes, std::uint64_t c_demand_bytes,
+                   std::uint64_t resident_bytes = 0) {
+    TileWork tile;
+    tile.load_bytes = load_bytes;
+    tile.store_bytes = store_bytes;
+    tile.operations = operations;
+    tile.scratchpad_bytes = scratchpad_bytes;
+    tile.a_load_bytes = a_load_bytes;
+    tile.b_load_bytes = b_load_bytes;
+    tile.c_load_bytes = c_load_bytes;
+    tile.a_demand_bytes = a_demand_bytes;
+    tile.b_demand_bytes = b_demand_bytes;
+    tile.c_demand_bytes = c_demand_bytes;
+    tile.resident_bytes = resident_bytes;
+    return tile;
+}
+
 // Maximum work items materialised per strategy to prevent OOM.
 // 10M tiles × 32 bytes = 320 MB ceiling.
 static constexpr std::uint64_t MAX_TILE_COUNT = 10'000'000;
@@ -141,7 +162,9 @@ std::vector<TileWork> build_row_stationary(const HardwareParams& p_in) {
                     const auto load_c = (ki == 0) ? c_bytes : std::uint64_t(0);
                     const auto load = safe_add(safe_add(load_a, b_bytes), load_c);
                     const auto store = (ki == kt - 1) ? c_bytes : std::uint64_t(0);
-                    work.push_back({load, store, safe_mul(safe_mul(safe_mul(2ULL, m), n), k), sp_bytes});
+                    work.push_back(make_tile(load, store, safe_mul(safe_mul(safe_mul(2ULL, m), n), k),
+                                             sp_bytes, load_a, b_bytes, load_c,
+                                             a_bytes, b_bytes, c_bytes));
                 }
             }
 
@@ -188,7 +211,10 @@ std::vector<TileWork> build_output_stationary(const HardwareParams& p_in) {
                 // C is already resident for ki > 0; the double-buffer prefetch
                 // check uses this to avoid double-counting the shared C tile.
                 const auto resident = ki == 0 ? std::uint64_t(0) : c_bytes;
-                work.push_back({load, store, ops, sp_bytes, resident});
+                const auto c_load = ki == 0 ? c_bytes : std::uint64_t(0);
+                work.push_back(make_tile(load, store, ops, sp_bytes,
+                                         a_bytes, b_bytes, c_load,
+                                         a_bytes, b_bytes, c_bytes, resident));
             }
         }
     }
@@ -224,8 +250,11 @@ std::vector<TileWork> build_input_stationary(const HardwareParams& p_in) {
                 const auto b_bytes = safe_mul(safe_mul(k, n), p.element_bytes);
                 const auto c_bytes = safe_mul(safe_mul(m, n), p.element_bytes);
                 const auto sp_bytes = safe_add(safe_add(a_bytes, b_bytes), c_bytes);
-                const auto load = safe_add(safe_add(ni == 0 ? a_bytes : std::uint64_t(0), b_bytes), c_bytes);
-                work.push_back({load, c_bytes, safe_mul(safe_mul(safe_mul(2ULL, m), n), k), sp_bytes});
+                const auto a_load = ni == 0 ? a_bytes : std::uint64_t(0);
+                const auto load = safe_add(safe_add(a_load, b_bytes), c_bytes);
+                work.push_back(make_tile(load, c_bytes, safe_mul(safe_mul(safe_mul(2ULL, m), n), k),
+                                         sp_bytes, a_load, b_bytes, c_bytes,
+                                         a_bytes, b_bytes, c_bytes));
             }
         }
     }
@@ -276,6 +305,12 @@ void SequentialTilingEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metri
         trace_compute_start_ = metrics.total_cycles;
         compute_remaining_ = compute_cycles(params_, tile.operations);
         metrics.operations = safe_add(metrics.operations, tile.operations);
+        metrics.a_load_bytes = safe_add(metrics.a_load_bytes, tile.a_load_bytes);
+        metrics.b_load_bytes = safe_add(metrics.b_load_bytes, tile.b_load_bytes);
+        metrics.c_load_bytes = safe_add(metrics.c_load_bytes, tile.c_load_bytes);
+        metrics.a_demand_bytes = safe_add(metrics.a_demand_bytes, tile.a_demand_bytes);
+        metrics.b_demand_bytes = safe_add(metrics.b_demand_bytes, tile.b_demand_bytes);
+        metrics.c_demand_bytes = safe_add(metrics.c_demand_bytes, tile.c_demand_bytes);
         compute_started_ = true;
     }
 
@@ -394,6 +429,12 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
         current_ready_ = true;
         compute_remaining_ = compute_cycles(params_, tile.operations);
         metrics.operations = safe_add(metrics.operations, tile.operations);
+        metrics.a_load_bytes = safe_add(metrics.a_load_bytes, tile.a_load_bytes);
+        metrics.b_load_bytes = safe_add(metrics.b_load_bytes, tile.b_load_bytes);
+        metrics.c_load_bytes = safe_add(metrics.c_load_bytes, tile.c_load_bytes);
+        metrics.a_demand_bytes = safe_add(metrics.a_demand_bytes, tile.a_demand_bytes);
+        metrics.b_demand_bytes = safe_add(metrics.b_demand_bytes, tile.b_demand_bytes);
+        metrics.c_demand_bytes = safe_add(metrics.c_demand_bytes, tile.c_demand_bytes);
     }
 
     // Compute combined footprint. The next tile's resident_bytes are already
@@ -474,6 +515,12 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
     if (current_ready_) {
         compute_remaining_ = compute_cycles(params_, work_[index_].operations);
         metrics.operations = safe_add(metrics.operations, work_[index_].operations);
+        metrics.a_load_bytes = safe_add(metrics.a_load_bytes, work_[index_].a_load_bytes);
+        metrics.b_load_bytes = safe_add(metrics.b_load_bytes, work_[index_].b_load_bytes);
+        metrics.c_load_bytes = safe_add(metrics.c_load_bytes, work_[index_].c_load_bytes);
+        metrics.a_demand_bytes = safe_add(metrics.a_demand_bytes, work_[index_].a_demand_bytes);
+        metrics.b_demand_bytes = safe_add(metrics.b_demand_bytes, work_[index_].b_demand_bytes);
+        metrics.c_demand_bytes = safe_add(metrics.c_demand_bytes, work_[index_].c_demand_bytes);
     }
 }
 
