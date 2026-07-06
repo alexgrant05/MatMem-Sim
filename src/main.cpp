@@ -1,5 +1,7 @@
 #include "hardware_params.h"
+#include "energy_model.h"
 #include "simulator.h"
+#include "tuner.h"
 
 #include <cstdlib>
 #include <limits>
@@ -43,29 +45,10 @@ std::uint64_t parse_pos_uint(const std::string& s, const std::string& flag) {
     return v;
 }
 
-// operations = 2 * MACs (FLOPs). Energy is:
-//   DRAM:  dram_bytes * E_dram_per_byte
-//   SRAM:  (dram_bytes/elem + operations) * E_sram_per_access
-//            dram_bytes/elem  = scratchpad I/O elements
-//            operations       = 2 operand reads per MAC = 2*(ops/2) = ops
-//   MAC:   (operations/2) * E_mac_pj   [ops/2 = number of MACs]
-struct EnergyResult { double energy_pj; double ops_per_pj; };
-
-EnergyResult compute_energy(const HardwareParams& p, const Metrics& m) {
-    const double ops = static_cast<double>(m.operations);
-    const double sram_acc = static_cast<double>(m.dram_bytes) / static_cast<double>(p.element_bytes)
-                          + ops;
-    const double e = static_cast<double>(m.dram_bytes) * p.energy_dram_pj_per_byte
-                   + sram_acc * p.energy_sram_pj_per_access
-                   + (ops / 2.0) * p.energy_mac_pj;
-    const double opp = e > 0.0 ? ops / e : 0.0;
-    return {e, opp};
-}
-
 void print_usage() {
     std::cout <<
         "usage: matmem-sim\n"
-        "  [--strategy row_stationary|output_stationary|input_stationary|double_buffer]\n"
+        "  [--strategy auto|row_stationary|output_stationary|input_stationary|double_buffer]\n"
         "  [--scratchpad-kb N]      scratchpad capacity in KB (default 32)\n"
         "  [--dram-latency N]       DRAM round-trip latency in cycles (default 100)\n"
         "  [--bandwidth N]          DRAM bandwidth in bytes/cycle (default 32)\n"
@@ -76,6 +59,8 @@ void print_usage() {
         "  [--tile-m N]             tile M size, 0 = auto (default 0)\n"
         "  [--tile-n N]             tile N size, 0 = auto (default 0)\n"
         "  [--tile-k N]             tile K size, 0 = auto (default 0)\n"
+        "  [--tune-objective cycles|energy|dram_bytes] (auto strategy only)\n"
+        "  [--tune-budget N]        exact simulation budget, minimum 4 (default 256)\n"
         "  [--csv]                  emit CSV row instead of human-readable output\n"
         "  [--trace]                print per-tile Gantt (load/compute/store cycle ranges)\n";
 }
@@ -87,6 +72,9 @@ int main(int argc, char** argv) {
     std::string strategy = "row_stationary";
     bool csv = false;
     bool trace = false;
+    TuneOptions tune_options;
+    bool tune_objective_set = false;
+    bool tune_budget_set = false;
 
     try {
         for (int i = 1; i < argc; ++i) {
@@ -117,6 +105,12 @@ int main(int argc, char** argv) {
                 params.tile_n = parse_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--tile-k") {
                 params.tile_k = parse_uint(value_after(i, argc, argv), arg);
+            } else if (arg == "--tune-objective") {
+                tune_options.objective = parse_tune_objective(value_after(i, argc, argv));
+                tune_objective_set = true;
+            } else if (arg == "--tune-budget") {
+                tune_options.max_evaluations = parse_pos_uint(value_after(i, argc, argv), arg);
+                tune_budget_set = true;
             } else if (arg == "--csv") {
                 csv = true;
             } else if (arg == "--trace") {
@@ -129,9 +123,32 @@ int main(int argc, char** argv) {
             }
         }
 
+        const bool tuning = strategy == "auto";
+        if (!tuning && (tune_objective_set || tune_budget_set)) {
+            throw std::invalid_argument("--tune-objective and --tune-budget require --strategy auto");
+        }
+
         std::vector<TraceRecord> trace_records;
-        const auto metrics = run_simulation(params, strategy, trace ? &trace_records : nullptr);
-        const auto energy = compute_energy(params, metrics);
+        Metrics metrics;
+        EnergyResult energy;
+        TuneStats tune_stats;
+        HardwareParams result_params = params;
+        std::string result_strategy = strategy;
+        if (tuning) {
+            const auto result = tune_configuration(params, tune_options);
+            result_strategy = result.strategy;
+            result_params = result.params;
+            metrics = result.metrics;
+            energy = result.energy;
+            tune_stats = result.stats;
+            if (trace) {
+                metrics = run_simulation(result_params, result_strategy, &trace_records);
+                energy = compute_energy(result_params, metrics);
+            }
+        } else {
+            metrics = run_simulation(params, strategy, trace ? &trace_records : nullptr);
+            energy = compute_energy(params, metrics);
+        }
 
         if (csv) {
             std::cout << "strategy,scratchpad_kb,dram_latency,bandwidth,compute_ops,"
@@ -139,8 +156,11 @@ int main(int argc, char** argv) {
                          "total_cycles,compute_cycles,dram_stall_cycles,dram_bytes,"
                          "compute_utilization,arithmetic_intensity,effective_ops_per_cycle,"
                          "energy_pj,ops_per_pj,"
-                         "a_reuse_factor,b_reuse_factor,c_reuse_factor\n";
-            std::cout << strategy << ','
+                         "a_reuse_factor,b_reuse_factor,c_reuse_factor,"
+                         "tuned,tune_objective,tile_m,tile_n,tile_k,"
+                         "tune_candidates_considered,tune_candidates_evaluated,"
+                         "tune_candidates_rejected\n";
+            std::cout << result_strategy << ','
                       << params.scratchpad_bytes / 1024 << ','
                       << params.dram_latency_cycles << ','
                       << params.dram_bandwidth_bytes_per_cycle << ','
@@ -159,10 +179,30 @@ int main(int argc, char** argv) {
                       << energy.ops_per_pj << ','
                       << metrics.a_reuse_factor() << ','
                       << metrics.b_reuse_factor() << ','
-                      << metrics.c_reuse_factor() << '\n';
+                      << metrics.c_reuse_factor() << ','
+                      << (tuning ? 1 : 0) << ',';
+            if (tuning) {
+                std::cout << tune_objective_name(tune_options.objective);
+            }
+            std::cout << ',' << result_params.tile_m
+                      << ',' << result_params.tile_n
+                      << ',' << result_params.tile_k
+                      << ',' << tune_stats.candidates_considered
+                      << ',' << tune_stats.candidates_evaluated
+                      << ',' << tune_stats.candidates_rejected << '\n';
         } else {
             std::cout << std::fixed << std::setprecision(4);
-            std::cout << "strategy: " << strategy << '\n';
+            std::cout << "strategy: " << result_strategy << '\n';
+            if (tuning) {
+                std::cout << "tuned: true\n";
+                std::cout << "tune_objective: " << tune_objective_name(tune_options.objective) << '\n';
+                std::cout << "tile_m: " << result_params.tile_m << '\n';
+                std::cout << "tile_n: " << result_params.tile_n << '\n';
+                std::cout << "tile_k: " << result_params.tile_k << '\n';
+                std::cout << "tune_candidates_considered: " << tune_stats.candidates_considered << '\n';
+                std::cout << "tune_candidates_evaluated: " << tune_stats.candidates_evaluated << '\n';
+                std::cout << "tune_candidates_rejected: " << tune_stats.candidates_rejected << '\n';
+            }
             std::cout << "total_cycles: " << metrics.total_cycles << '\n';
             std::cout << "compute_cycles: " << metrics.compute_cycles << '\n';
             std::cout << "dram_stall_cycles: " << metrics.dram_stall_cycles << '\n';

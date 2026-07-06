@@ -547,3 +547,10 @@ std::unique_ptr<TilingEngine> make_strategy(const std::string& name, const Hardw
     }
     throw std::invalid_argument("unknown strategy: " + name);
 }
+
+const std::array<const char*, 4>& supported_strategies() {
+    static const std::array<const char*, 4> names = {
+        "row_stationary", "output_stationary", "input_stationary", "double_buffer"
+    };
+    return names;
+}

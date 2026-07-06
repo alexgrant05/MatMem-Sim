@@ -17,7 +17,7 @@ Metrics run_simulation(const HardwareParams& params, const std::string& strategy
     while (!strategy->done()) {
         strategy->tick(dram, scratchpad, metrics);
         if (metrics.total_cycles > max_cycles) {
-            throw std::runtime_error("simulation exceeded max cycle guard");
+            throw SimulationLimitError("simulation exceeded max cycle guard");
         }
     }
 

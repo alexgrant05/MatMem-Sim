@@ -9,8 +9,10 @@ find_package(Python3 COMPONENTS Interpreter)
 
 add_library(matmem_core
     src/dram_model.cpp
+    src/energy_model.cpp
     src/scratchpad.cpp
     src/simulator.cpp
+    src/tuner.cpp
     src/tiling_strategies.cpp
 )
 
@@ -40,6 +42,10 @@ add_test(NAME test_simulation COMMAND test_simulation)
 add_executable(test_smoke tests/test_smoke.cpp)
 target_link_libraries(test_smoke PRIVATE matmem_core)
 add_test(NAME test_smoke COMMAND test_smoke)
+
+add_executable(test_tuner tests/test_tuner.cpp)
+target_link_libraries(test_tuner PRIVATE matmem_core)
+add_test(NAME test_tuner COMMAND test_tuner)
 
 if(Python3_FOUND)
     add_test(NAME test_cli_csv

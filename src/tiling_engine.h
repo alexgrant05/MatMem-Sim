@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -136,3 +137,4 @@ private:
 };
 
 std::unique_ptr<TilingEngine> make_strategy(const std::string& name, const HardwareParams& params);
+const std::array<const char*, 4>& supported_strategies();

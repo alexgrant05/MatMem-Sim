@@ -13,7 +13,7 @@ This repository is scoped as an ~8 week summer project summer learning project t
 It models:
 
 - Fixed-latency, bandwidth-limited DRAM requests
-- Finite scratchpad capacity with automatic tile-size selection
+- Finite scratchpad capacity with automatic tile and strategy selection
 - Matrix multiply compute throughput
 - Four tiling strategies: row stationary, output stationary, input stationary, and double buffering
 - Parameter sweeps over scratchpad size, DRAM latency, and bandwidth
@@ -52,24 +52,41 @@ On multi-config generators (Visual Studio) the executable is at `.\build\Debug\m
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--strategy` | `row_stationary` | `row_stationary`, `output_stationary`, `input_stationary`, `double_buffer` |
+| `--strategy` | `row_stationary` | `auto`, `row_stationary`, `output_stationary`, `input_stationary`, `double_buffer` |
 | `--scratchpad-kb N` | `32` | Scratchpad capacity in KB |
 | `--dram-latency N` | `100` | DRAM round-trip latency in cycles |
 | `--bandwidth N` | `32` | DRAM bandwidth in bytes/cycle |
 | `--compute-ops N` | `256` | Compute throughput in ops/cycle |
 | `--matrix-m/n/k N` | `256` | Matrix dimensions |
 | `--tile-m/n/k N` | `0` | Tile dimensions; `0` = auto-size to scratchpad |
+| `--tune-objective NAME` | `cycles` | Auto-tuner objective: `cycles`, `energy`, or `dram_bytes` |
+| `--tune-budget N` | `256` | Maximum exact simulations during tuning; minimum `4` |
 | `--csv` | off | Emit a single CSV row instead of human-readable output |
 | `--trace` | off | Print per-tile load, compute, and store ranges for Gantt plots |
 
 ### Auto tile sizing
 
-When `--tile-m/n/k` are left at `0` (the default), the simulator picks the largest square tile that fits in the scratchpad given the strategy's buffer requirements:
+For a named strategy, leaving `--tile-m/n/k` at `0` preserves the original fast heuristic. The simulator picks the largest square tile that fits the strategy's buffer requirements:
 
 - Row stationary, output stationary, and input stationary: one tile must fit (A + B + C = 3t²·elem ≤ scratchpad)
 - Double buffering: two tiles must fit simultaneously (6t²·elem ≤ scratchpad)
 
 This means larger scratchpads use larger tiles, which is what makes the Pareto plots meaningful.
+
+### Global auto-tuner
+
+Use `--strategy auto` to search tile shapes across all four strategies:
+
+```powershell
+.\build\matmem-sim.exe --strategy auto --matrix-m 256 --matrix-n 256 --matrix-k 256
+.\build\matmem-sim.exe --strategy auto --tune-objective energy --tune-budget 512
+```
+
+The tuner starts with capacity-aware coarse shapes and then refines the strongest candidates. It is deterministic for a fixed configuration and budget. A larger budget can find a better shape but requires more simulator runs. The default objective minimizes total cycles; `energy` minimizes modeled energy and `dram_bytes` minimizes off-chip traffic.
+
+When all three tile dimensions are supplied with `--strategy auto`, the tuner keeps that shape and compares only the strategies. Partial tile specifications are invalid. Named strategies do not accept tuning flags, so tuning options cannot be ignored accidentally.
+
+The reusable `tune_configuration()` C++ API returns the winning strategy, explicit tile dimensions, metrics, energy, and search statistics. It is intended to be the simulator entry point for a future DNN workload driver.
 
 ## Run Sweeps
 
@@ -121,6 +138,8 @@ The simulator emits:
 | `a_reuse_factor` | Logical A tile demand divided by actual A DRAM load bytes |
 | `b_reuse_factor` | Logical B tile demand divided by actual B DRAM load bytes |
 | `c_reuse_factor` | Logical C tile demand divided by actual C DRAM load bytes |
+
+Tuned CSV rows also include `tuned`, `tune_objective`, the selected `tile_m/n/k`, and considered, evaluated, and rejected candidate counts. The `strategy` field contains the concrete winning strategy rather than `auto`. Normal rows retain zero tile values when a named strategy uses the square heuristic.
 
 Reuse factors count loads only. C writebacks still contribute to `dram_bytes` and energy, but they are not included in `c_reuse_factor`.
 
