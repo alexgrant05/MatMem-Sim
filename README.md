@@ -97,6 +97,15 @@ python plots\plot_results.py results\sweep.csv
 
 The default sweep covers 4 strategies × 6 scratchpad sizes × 3 DRAM latencies × 4 bandwidths = **288 simulations**. Pass `--matrix-m/n/k` to the sweep script to change matrix dimensions.
 
+To sweep the global tuner instead of the four fixed strategies:
+
+```powershell
+python scripts\run_sweep.py --strategy auto --out results\auto_sweep.csv
+python plots\plot_results.py results\auto_sweep.csv
+```
+
+Auto sweep plots use the CSV stem as a filename prefix, so `auto_sweep.csv` writes files such as `auto_sweep_roofline.png` without replacing the regular sweep figures. You can also pass `--tune-objective` and `--tune-budget` through the sweep script.
+
 The plot script generates six figures in `results/`:
 
 | File | Description |
@@ -107,6 +116,14 @@ The plot script generates six figures in `results/`:
 | `latency_sensitivity.png` | Compute utilization vs scratchpad at each DRAM latency, one panel per strategy |
 | `bandwidth_sensitivity.png` | Compute utilization vs scratchpad at each DRAM bandwidth, one panel per strategy |
 | `energy_efficiency.png` | Energy efficiency (ops/pJ) vs scratchpad size per strategy |
+
+For tuned CSVs, the same six plots are generated with the CSV stem prefix. The plot script also adds tuner-specific summaries:
+
+| File | Description |
+|------|-------------|
+| `auto_sweep_auto_strategy_selection.png` | Winning strategy vs scratchpad size for the reference latency/bandwidth slice |
+| `auto_sweep_auto_tile_shape.png` | Selected tile M/N/K dimensions vs scratchpad size |
+| `auto_sweep_auto_search_effort.png` | Evaluated and rejected candidate counts vs scratchpad size |
 
 These sweep figures are committed so the repository includes a current visual snapshot of the simulator output.
 

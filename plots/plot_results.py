@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import sys
+import argparse
 from pathlib import Path
 
 import matplotlib
@@ -28,6 +28,12 @@ STYLES = {
 DEFAULT_STYLE = dict(linestyle="-", marker="o")
 # Draw order for overlay plots: input_stationary last so it sits on top.
 DRAW_ORDER = ["row_stationary", "output_stationary", "double_buffer", "input_stationary"]
+STRATEGY_COLORS = {
+    "row_stationary": "tab:blue",
+    "output_stationary": "tab:orange",
+    "input_stationary": "tab:green",
+    "double_buffer": "tab:red",
+}
 
 
 def overlay_groups(frame):
@@ -38,10 +44,31 @@ def overlay_groups(frame):
         yield strategy, frame[frame["strategy"] == strategy]
 
 
+def tuned_rows(frame):
+    if "tuned" not in frame.columns:
+        return frame.iloc[0:0].copy()
+    return frame[frame["tuned"].astype(str) == "1"].copy()
+
+
 def main() -> None:
-    csv_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("results/sweep.csv")
+    parser = argparse.ArgumentParser(description="Plot matmem-sim sweep CSV results")
+    parser.add_argument("csv_path", nargs="?", type=Path, default=Path("results/sweep.csv"))
+    parser.add_argument(
+        "--prefix",
+        default=None,
+        help="prefix for output filenames; defaults to none for sweep.csv and CSV stem otherwise",
+    )
+    args = parser.parse_args()
+
+    csv_path = args.csv_path
     df = pd.read_csv(csv_path)
     out_dir = csv_path.parent
+    prefix = args.prefix
+    if prefix is None:
+        prefix = "" if csv_path.name == "sweep.csv" else f"{csv_path.stem}_"
+
+    def out(name: str) -> Path:
+        return out_dir / f"{prefix}{name}"
 
     df["scratchpad_kb"] = df["scratchpad_kb"].astype(int)
     df["dram_latency"] = df["dram_latency"].astype(int)
@@ -72,7 +99,7 @@ def main() -> None:
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(out_dir / "roofline.png", dpi=160)
+    plt.savefig(out("roofline.png"), dpi=160)
 
     # ── Plot 2: Scratchpad Pareto ─────────────────────────────────────────────
     plt.figure(figsize=(8, 5))
@@ -85,7 +112,7 @@ def main() -> None:
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(out_dir / "scratchpad_pareto.png", dpi=160)
+    plt.savefig(out("scratchpad_pareto.png"), dpi=160)
 
     # ── Plot 3: Stall breakdown ───────────────────────────────────────────────
     plt.figure(figsize=(8, 5))
@@ -95,7 +122,7 @@ def main() -> None:
     plt.ylabel("DRAM stall cycles")
     plt.title(f"Stall breakdown — latency {REF_LATENCY} cyc, bandwidth {REF_BANDWIDTH} B/cyc")
     plt.tight_layout()
-    plt.savefig(out_dir / "stall_breakdown.png", dpi=160)
+    plt.savefig(out("stall_breakdown.png"), dpi=160)
 
     # ── Plot 4: Latency sensitivity ───────────────────────────────────────────
     lat_df = df[df["bandwidth"] == REF_BANDWIDTH]
@@ -120,7 +147,7 @@ def main() -> None:
     axes[0].set_ylabel("Compute utilization")
     fig.suptitle(f"Latency sensitivity — bandwidth {REF_BANDWIDTH} B/cyc")
     plt.tight_layout()
-    plt.savefig(out_dir / "latency_sensitivity.png", dpi=160)
+    plt.savefig(out("latency_sensitivity.png"), dpi=160)
 
     # ── Plot 5: Bandwidth sensitivity ─────────────────────────────────────────
     bw_df = df[df["dram_latency"] == REF_LATENCY]
@@ -144,7 +171,7 @@ def main() -> None:
     axes[0].set_ylabel("Compute utilization")
     fig.suptitle(f"Bandwidth sensitivity — DRAM latency {REF_LATENCY} cycles")
     plt.tight_layout()
-    plt.savefig(out_dir / "bandwidth_sensitivity.png", dpi=160)
+    plt.savefig(out("bandwidth_sensitivity.png"), dpi=160)
 
     # ── Plot 6: Energy efficiency ─────────────────────────────────────────────
     plt.figure(figsize=(8, 5))
@@ -157,7 +184,58 @@ def main() -> None:
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(out_dir / "energy_efficiency.png", dpi=160)
+    plt.savefig(out("energy_efficiency.png"), dpi=160)
+
+    auto_ref = tuned_rows(ref)
+    if not auto_ref.empty:
+        auto_ref = auto_ref.sort_values("scratchpad_kb")
+        strategy_order = [s for s in DRAW_ORDER if s in set(auto_ref["strategy"])]
+        strategy_order += [s for s in auto_ref["strategy"].unique() if s not in strategy_order]
+        strategy_rank = {s: i for i, s in enumerate(strategy_order)}
+
+        plt.figure(figsize=(8, 4.5))
+        y = auto_ref["strategy"].map(strategy_rank)
+        colors = auto_ref["strategy"].map(lambda s: STRATEGY_COLORS.get(s, "tab:gray"))
+        plt.scatter(auto_ref["scratchpad_kb"], y, c=colors, s=80)
+        plt.yticks(range(len(strategy_order)), [s.replace("_", " ") for s in strategy_order])
+        plt.xlabel("Scratchpad size (KB)")
+        plt.ylabel("Winning strategy")
+        plt.title(f"Auto-tuner strategy choice - latency {REF_LATENCY} cyc, bandwidth {REF_BANDWIDTH} B/cyc")
+        plt.grid(True, axis="x", alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(out("auto_strategy_selection.png"), dpi=160)
+
+        plt.figure(figsize=(8, 5))
+        for column, label, marker in [
+            ("tile_m", "tile M", "o"),
+            ("tile_n", "tile N", "s"),
+            ("tile_k", "tile K", "^"),
+        ]:
+            plt.plot(auto_ref["scratchpad_kb"], auto_ref[column],
+                     marker=marker, label=label)
+        plt.xlabel("Scratchpad size (KB)")
+        plt.ylabel("Selected tile dimension")
+        plt.title(f"Auto-tuner tile shape - latency {REF_LATENCY} cyc, bandwidth {REF_BANDWIDTH} B/cyc")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(out("auto_tile_shape.png"), dpi=160)
+
+        plt.figure(figsize=(8, 5))
+        for column, label, marker in [
+            ("tune_candidates_evaluated", "evaluated", "o"),
+            ("tune_candidates_rejected", "rejected", "s"),
+        ]:
+            if column in auto_ref:
+                plt.plot(auto_ref["scratchpad_kb"], auto_ref[column],
+                         marker=marker, label=label)
+        plt.xlabel("Scratchpad size (KB)")
+        plt.ylabel("Candidate count")
+        plt.title(f"Auto-tuner search effort - latency {REF_LATENCY} cyc, bandwidth {REF_BANDWIDTH} B/cyc")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(out("auto_search_effort.png"), dpi=160)
 
     print(f"wrote plots to {out_dir}")
 
