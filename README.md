@@ -126,7 +126,7 @@ For tuned CSVs, the same six plots are generated with the CSV stem prefix. The p
 | `auto_sweep_auto_tile_shape.png` | Selected tile M/N/K dimensions vs scratchpad size |
 | `auto_sweep_auto_search_effort.png` | Evaluated and rejected candidate counts vs scratchpad size |
 
-These sweep figures are committed so the repository includes a current visual snapshot of the simulator output.
+Sweep CSVs are committed as lightweight reference data. Plot PNGs are generated from those CSVs and ignored by git to keep the repository small.
 
 ## Run GEMM Workloads
 
