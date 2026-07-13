@@ -1,0 +1,6 @@
+build/
+__pycache__/
+.pytest_cache/
+
+# Generated plots. Keep CSV result data trackable.
+results/*.png

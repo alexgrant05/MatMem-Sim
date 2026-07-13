@@ -57,6 +57,7 @@ On multi-config generators (Visual Studio) the executable is at `.\build\Debug\m
 | `--dram-latency N` | `100` | DRAM round-trip latency in cycles |
 | `--bandwidth N` | `32` | DRAM bandwidth in bytes/cycle |
 | `--compute-ops N` | `256` | Compute throughput in ops/cycle |
+| `--element-bytes N` | `4` | Bytes per matrix element |
 | `--matrix-m/n/k N` | `256` | Matrix dimensions |
 | `--tile-m/n/k N` | `0` | Tile dimensions; `0` = auto-size to scratchpad |
 | `--tune-objective NAME` | `cycles` | Auto-tuner objective: `cycles`, `energy`, or `dram_bytes` |
@@ -126,6 +127,36 @@ For tuned CSVs, the same six plots are generated with the CSV stem prefix. The p
 | `auto_sweep_auto_search_effort.png` | Evaluated and rejected candidate counts vs scratchpad size |
 
 These sweep figures are committed so the repository includes a current visual snapshot of the simulator output.
+
+## Run GEMM Workloads
+
+For a model-like sequence of independent GEMMs, use the workload driver:
+
+```powershell
+python scripts\run_workload.py examples\gemm_workload.csv --out results\gemm_workload.csv
+```
+
+The input CSV has four required columns:
+
+```csv
+name,m,n,k
+attention_qkv,256,768,768
+mlp_up,256,3072,768
+```
+
+The driver defaults to `--strategy auto`, so each layer is tuned independently and the output CSV records the concrete winning strategy and tile shape. Hardware flags such as `--scratchpad-kb`, `--dram-latency`, `--bandwidth`, `--compute-ops`, and `--element-bytes` apply to every layer. `--tune-objective` and `--tune-budget` pass through to the auto-tuner.
+
+The workload CSV adds `layer_index` and `layer_name` in front of the normal simulator metrics. The script also prints total cycles, energy, DRAM bytes, overall throughput, and strategy counts.
+
+It writes three plots next to the output CSV:
+
+| File | Description |
+|------|-------------|
+| `gemm_workload_cycles_by_layer.png` | Total cycles for each GEMM layer |
+| `gemm_workload_energy_by_layer.png` | Energy for each GEMM layer |
+| `gemm_workload_strategy_distribution.png` | Count of layers won by each strategy |
+
+This is the intended bridge toward future Conv2D support: a Conv2D layer can later be lowered into one or more GEMM rows and sent through the same driver.
 
 ## Gantt Traces
 

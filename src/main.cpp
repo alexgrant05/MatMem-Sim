@@ -53,6 +53,7 @@ void print_usage() {
         "  [--dram-latency N]       DRAM round-trip latency in cycles (default 100)\n"
         "  [--bandwidth N]          DRAM bandwidth in bytes/cycle (default 32)\n"
         "  [--compute-ops N]        compute throughput in ops/cycle (default 256)\n"
+        "  [--element-bytes N]      bytes per matrix element (default 4)\n"
         "  [--matrix-m N]           matrix M dimension (default 256)\n"
         "  [--matrix-n N]           matrix N dimension (default 256)\n"
         "  [--matrix-k N]           matrix K dimension (default 256)\n"
@@ -93,6 +94,8 @@ int main(int argc, char** argv) {
                 params.dram_bandwidth_bytes_per_cycle = parse_pos_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--compute-ops") {
                 params.compute_ops_per_cycle = parse_pos_uint(value_after(i, argc, argv), arg);
+            } else if (arg == "--element-bytes") {
+                params.element_bytes = parse_pos_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--matrix-m") {
                 params.matrix_m = parse_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--matrix-n") {

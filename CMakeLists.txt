@@ -50,4 +50,7 @@ add_test(NAME test_tuner COMMAND test_tuner)
 if(Python3_FOUND)
     add_test(NAME test_cli_csv
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli_csv.py $<TARGET_FILE:matmem-sim>)
+    add_test(NAME test_workload
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_workload.py
+                ${CMAKE_CURRENT_SOURCE_DIR} $<TARGET_FILE:matmem-sim>)
 endif()
