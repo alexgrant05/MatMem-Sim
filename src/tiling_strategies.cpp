@@ -301,6 +301,18 @@ void SequentialTilingEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metri
         return;
     }
 
+    if (!scratchpad_pre_compute_started_) {
+        scratchpad_pre_compute_remaining_ = params_.scratchpad_latency_cycles;
+        scratchpad_pre_compute_started_ = true;
+    }
+    if (scratchpad_pre_compute_remaining_ > 0) {
+        --scratchpad_pre_compute_remaining_;
+        metrics.scratchpad_stall_cycles++;
+        dram.tick();
+        metrics.total_cycles++;
+        return;
+    }
+
     if (!compute_started_) {
         trace_compute_start_ = metrics.total_cycles;
         compute_remaining_ = compute_cycles(params_, tile.operations);
@@ -319,11 +331,25 @@ void SequentialTilingEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metri
         metrics.compute_cycles++;
         dram.tick();
         metrics.total_cycles++;
+        if (compute_remaining_ == 0) {
+            trace_compute_end_ = metrics.total_cycles;
+        }
+        return;
+    }
+
+    if (tile.store_bytes > 0 && !scratchpad_pre_store_started_) {
+        scratchpad_pre_store_remaining_ = params_.scratchpad_latency_cycles;
+        scratchpad_pre_store_started_ = true;
+    }
+    if (scratchpad_pre_store_remaining_ > 0) {
+        --scratchpad_pre_store_remaining_;
+        metrics.scratchpad_stall_cycles++;
+        dram.tick();
+        metrics.total_cycles++;
         return;
     }
 
     if (!store_issued_) {
-        trace_compute_end_ = metrics.total_cycles;
         const auto store_trace = issue_traced_request(dram, tile.store_bytes, metrics.total_cycles);
         trace_store_start_ = store_trace.start;
         trace_store_end_ = store_trace.end;
@@ -344,6 +370,10 @@ void SequentialTilingEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metri
     load_issued_ = false;
     store_issued_ = false;
     compute_started_ = false;
+    scratchpad_pre_compute_started_ = false;
+    scratchpad_pre_store_started_ = false;
+    scratchpad_pre_compute_remaining_ = 0;
+    scratchpad_pre_store_remaining_ = 0;
 }
 
 bool SequentialTilingEngine::done() const {
@@ -426,6 +456,46 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
             metrics.total_cycles++;
             return;
         }
+
+        // The current tile is resident now, so its successor can start DMA
+        // into the other buffer while this tile pays its scratchpad pipeline
+        // delay.  Waiting until compute starts here would unnecessarily
+        // shorten the prefetch window by scratchpad_latency_cycles.
+        //
+        // The next tile's resident_bytes are already present in the current
+        // tile's scratchpad (shared C across K-sub-tiles of one output tile),
+        // so only the incremental bytes need to fit alongside this tile.
+        const auto next_sp       = prefetched_index_ < work_.size()
+                               ? work_[prefetched_index_].scratchpad_bytes : 0;
+        const auto next_resident = prefetched_index_ < work_.size()
+                               ? work_[prefetched_index_].resident_bytes : 0;
+        const auto next_new      = next_sp - next_resident; // resident <= scratchpad by construction
+        const auto combined_sp   =
+            (next_new <= std::numeric_limits<std::uint64_t>::max() - tile.scratchpad_bytes)
+            ? tile.scratchpad_bytes + next_new
+            : std::numeric_limits<std::uint64_t>::max();
+
+        if (prefetched_index_ == index_ + 1 && prefetched_index_ < work_.size() &&
+            scratchpad.can_hold(combined_sp)) {
+            const auto load_trace = issue_traced_request(dram, work_[prefetched_index_].load_bytes,
+                                                         metrics.total_cycles);
+            next_load_start_ = load_trace.start;
+            next_load_end_ = load_trace.end;
+            next_load_remaining_ = load_trace.remaining;
+            ++prefetched_index_;
+        }
+
+        if (!scratchpad_pre_compute_started_) {
+            scratchpad_pre_compute_remaining_ = params_.scratchpad_latency_cycles;
+            scratchpad_pre_compute_started_ = true;
+        }
+        if (scratchpad_pre_compute_remaining_ > 0) {
+            --scratchpad_pre_compute_remaining_;
+            metrics.scratchpad_stall_cycles++;
+            tick_dram(dram);
+            metrics.total_cycles++;
+            return;
+        }
         current_ready_ = true;
         compute_remaining_ = compute_cycles(params_, tile.operations);
         metrics.operations = safe_add(metrics.operations, tile.operations);
@@ -437,30 +507,6 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
         metrics.c_demand_bytes = safe_add(metrics.c_demand_bytes, tile.c_demand_bytes);
     }
 
-    // Compute combined footprint. The next tile's resident_bytes are already
-    // present in the current tile's scratchpad (shared C across K-sub-tiles of
-    // the same output tile), so only the incremental new bytes need to fit.
-    // Saturate to UINT64_MAX on overflow so can_hold() returns false safely.
-    const auto next_sp       = prefetched_index_ < work_.size()
-                               ? work_[prefetched_index_].scratchpad_bytes : 0;
-    const auto next_resident = prefetched_index_ < work_.size()
-                               ? work_[prefetched_index_].resident_bytes : 0;
-    const auto next_new      = next_sp - next_resident; // safe: resident ≤ scratchpad by construction
-    const auto combined_sp   =
-        (next_new <= std::numeric_limits<std::uint64_t>::max() - tile.scratchpad_bytes)
-        ? tile.scratchpad_bytes + next_new
-        : std::numeric_limits<std::uint64_t>::max();
-
-    if (prefetched_index_ == index_ + 1 && prefetched_index_ < work_.size() &&
-        scratchpad.can_hold(combined_sp)) {
-        const auto load_trace = issue_traced_request(dram, work_[prefetched_index_].load_bytes,
-                                                     metrics.total_cycles);
-        next_load_start_ = load_trace.start;
-        next_load_end_ = load_trace.end;
-        next_load_remaining_ = load_trace.remaining;
-        ++prefetched_index_;
-    }
-
     if (compute_remaining_ > 0) {
         if (!cur_compute_recorded_) {
             cur_compute_start_ = metrics.total_cycles;
@@ -470,11 +516,25 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
         metrics.compute_cycles++;
         tick_dram(dram);
         metrics.total_cycles++;
+        if (compute_remaining_ == 0) {
+            cur_compute_end_ = metrics.total_cycles;
+        }
+        return;
+    }
+
+    if (tile.store_bytes > 0 && !scratchpad_pre_store_started_) {
+        scratchpad_pre_store_remaining_ = params_.scratchpad_latency_cycles;
+        scratchpad_pre_store_started_ = true;
+    }
+    if (scratchpad_pre_store_remaining_ > 0) {
+        --scratchpad_pre_store_remaining_;
+        metrics.scratchpad_stall_cycles++;
+        tick_dram(dram);
+        metrics.total_cycles++;
         return;
     }
 
     if (!current_store_issued_) {
-        cur_compute_end_ = metrics.total_cycles;
         const auto store_trace = issue_traced_request(dram, tile.store_bytes, metrics.total_cycles);
         cur_store_start_ = store_trace.start;
         cur_store_end_ = store_trace.end;
@@ -497,6 +557,10 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
                        metrics.total_cycles});
     ++index_;
     current_store_issued_ = false;
+    scratchpad_pre_compute_started_ = false;
+    scratchpad_pre_store_started_ = false;
+    scratchpad_pre_compute_remaining_ = 0;
+    scratchpad_pre_store_remaining_ = 0;
     // The prefetched next tile inherits its outstanding load countdown; it is
     // only ready to compute once that load has actually completed (== 0).
     cur_load_remaining_ = next_load_remaining_;
@@ -510,18 +574,8 @@ void DoubleBufferEngine::tick(DRAMModel& dram, Scratchpad& scratchpad, Metrics& 
     cur_store_start_      = 0;
     cur_store_end_        = 0;
     cur_compute_recorded_ = false;
-    current_ready_ = (index_ < work_.size()) && (prefetched_index_ > index_) &&
-                     (cur_load_remaining_ == 0);
-    if (current_ready_) {
-        compute_remaining_ = compute_cycles(params_, work_[index_].operations);
-        metrics.operations = safe_add(metrics.operations, work_[index_].operations);
-        metrics.a_load_bytes = safe_add(metrics.a_load_bytes, work_[index_].a_load_bytes);
-        metrics.b_load_bytes = safe_add(metrics.b_load_bytes, work_[index_].b_load_bytes);
-        metrics.c_load_bytes = safe_add(metrics.c_load_bytes, work_[index_].c_load_bytes);
-        metrics.a_demand_bytes = safe_add(metrics.a_demand_bytes, work_[index_].a_demand_bytes);
-        metrics.b_demand_bytes = safe_add(metrics.b_demand_bytes, work_[index_].b_demand_bytes);
-        metrics.c_demand_bytes = safe_add(metrics.c_demand_bytes, work_[index_].c_demand_bytes);
-    }
+    current_ready_ = false;
+    compute_remaining_ = 0;
 }
 
 bool DoubleBufferEngine::done() const {

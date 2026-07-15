@@ -87,6 +87,7 @@ def run_layer(exe: Path, args: argparse.Namespace, layer: dict[str, int | str]) 
         str(exe),
         "--strategy", args.strategy,
         "--scratchpad-kb", str(args.scratchpad_kb),
+        "--scratchpad-latency", str(args.scratchpad_latency),
         "--dram-latency", str(args.dram_latency),
         "--bandwidth", str(args.bandwidth),
         "--compute-ops", str(args.compute_ops),
@@ -173,6 +174,7 @@ def print_summary(rows: list[dict[str, str]]) -> None:
     total_cycles = sum(int(row["total_cycles"]) for row in rows)
     total_compute_cycles = sum(int(row["compute_cycles"]) for row in rows)
     total_dram_stall_cycles = sum(int(row["dram_stall_cycles"]) for row in rows)
+    total_scratchpad_stall_cycles = sum(int(row["scratchpad_stall_cycles"]) for row in rows)
     total_dram_bytes = sum(int(row["dram_bytes"]) for row in rows)
     total_energy_pj = sum(float(row["energy_pj"]) for row in rows)
     total_ops = sum(2 * int(row["matrix_m"]) * int(row["matrix_n"]) * int(row["matrix_k"])
@@ -184,6 +186,7 @@ def print_summary(rows: list[dict[str, str]]) -> None:
     print(f"total_cycles: {total_cycles}")
     print(f"total_compute_cycles: {total_compute_cycles}")
     print(f"total_dram_stall_cycles: {total_dram_stall_cycles}")
+    print(f"total_scratchpad_stall_cycles: {total_scratchpad_stall_cycles}")
     print(f"total_dram_bytes: {total_dram_bytes}")
     print(f"total_energy_pj: {total_energy_pj:.4f}")
     print(f"effective_ops_per_cycle: {effective_ops_per_cycle:.4f}")
@@ -204,6 +207,7 @@ def main() -> None:
         default="auto",
     )
     parser.add_argument("--scratchpad-kb", type=int, default=32)
+    parser.add_argument("--scratchpad-latency", type=int, default=1)
     parser.add_argument("--dram-latency", type=int, default=100)
     parser.add_argument("--bandwidth", type=int, default=32)
     parser.add_argument("--compute-ops", type=int, default=256)

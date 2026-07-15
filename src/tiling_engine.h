@@ -68,7 +68,11 @@ protected:
     bool load_issued_ = false;
     bool store_issued_ = false;
     bool compute_started_ = false;
+    bool scratchpad_pre_compute_started_ = false;
+    bool scratchpad_pre_store_started_ = false;
     std::uint64_t compute_remaining_ = 0;
+    std::uint64_t scratchpad_pre_compute_remaining_ = 0;
+    std::uint64_t scratchpad_pre_store_remaining_ = 0;
 
 private:
     std::vector<TraceRecord> traces_;
@@ -117,7 +121,11 @@ private:
     std::size_t prefetched_index_ = 0;
     bool current_ready_ = false;
     bool current_store_issued_ = false;
+    bool scratchpad_pre_compute_started_ = false;
+    bool scratchpad_pre_store_started_ = false;
     std::uint64_t compute_remaining_ = 0;
+    std::uint64_t scratchpad_pre_compute_remaining_ = 0;
+    std::uint64_t scratchpad_pre_store_remaining_ = 0;
     // Cycles until the current tile's load completes (0 = data resident).
     std::uint64_t cur_load_remaining_ = 0;
     // Cycles until the prefetched next tile's load completes.

@@ -23,6 +23,10 @@ def main() -> int:
         if field not in row:
             raise AssertionError(f"missing CSV field: {field}")
         float(row[field])
+    for field in ("scratchpad_latency", "scratchpad_stall_cycles"):
+        if field not in row:
+            raise AssertionError(f"missing CSV field: {field}")
+        int(row[field])
 
     for field in TUNE_FIELDS:
         if field not in row:

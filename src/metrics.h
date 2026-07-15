@@ -6,6 +6,7 @@ struct Metrics {
     std::uint64_t total_cycles = 0;
     std::uint64_t compute_cycles = 0;
     std::uint64_t dram_stall_cycles = 0;
+    std::uint64_t scratchpad_stall_cycles = 0;
     std::uint64_t dram_bytes = 0;
     std::uint64_t operations = 0;
     std::uint64_t a_load_bytes = 0;

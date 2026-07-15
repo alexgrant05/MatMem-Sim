@@ -31,13 +31,15 @@ def main() -> int:
                      "--out", str(out_csv))
         if "layers: 2" not in result.stdout:
             raise AssertionError("workload summary did not report two layers")
+        if "total_scratchpad_stall_cycles:" not in result.stdout:
+            raise AssertionError("workload summary did not report scratchpad stalls")
 
         rows = list(csv.DictReader(out_csv.read_text(encoding="utf-8").splitlines()))
         if len(rows) != 2:
             raise AssertionError(f"expected two workload rows, got {len(rows)}")
         required = {
             "layer_index", "layer_name", "matrix_m", "matrix_n", "matrix_k",
-            "strategy", "total_cycles", "energy_pj", "tuned",
+            "strategy", "total_cycles", "scratchpad_stall_cycles", "energy_pj", "tuned",
             "tune_candidates_evaluated",
         }
         for row in rows:

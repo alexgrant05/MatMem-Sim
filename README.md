@@ -8,12 +8,10 @@ Core question:
 
 ## Scope
 
-This repository is scoped as an ~8 week summer project summer learning project to explore memory system simulation, scratchpad tiling, accelerator dataflows, and performance/energy tradeoffs.
-
 It models:
 
 - Fixed-latency, bandwidth-limited DRAM requests
-- Finite scratchpad capacity with automatic tile and strategy selection
+- Finite scratchpad capacity and configurable pipeline-visible scratchpad latency
 - Matrix multiply compute throughput
 - Four tiling strategies: row stationary, output stationary, input stationary, and double buffering
 - Parameter sweeps over scratchpad size, DRAM latency, and bandwidth
@@ -46,14 +44,13 @@ ctest --test-dir build --output-on-failure
 .\build\matmem-sim.exe --strategy double_buffer --scratchpad-kb 32 --dram-latency 100
 ```
 
-On multi-config generators (Visual Studio) the executable is at `.\build\Debug\matmem-sim.exe`.
-
 ## CLI Reference
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--strategy` | `row_stationary` | `auto`, `row_stationary`, `output_stationary`, `input_stationary`, `double_buffer` |
 | `--scratchpad-kb N` | `32` | Scratchpad capacity in KB |
+| `--scratchpad-latency N` | `1` | Pipeline-visible scratchpad access latency in cycles; `0` disables this delay |
 | `--dram-latency N` | `100` | DRAM round-trip latency in cycles |
 | `--bandwidth N` | `32` | DRAM bandwidth in bytes/cycle |
 | `--compute-ops N` | `256` | Compute throughput in ops/cycle |
@@ -96,7 +93,7 @@ python scripts\run_sweep.py
 python plots\plot_results.py results\sweep.csv
 ```
 
-The default sweep covers 4 strategies × 6 scratchpad sizes × 3 DRAM latencies × 4 bandwidths = **288 simulations**. Pass `--matrix-m/n/k` to the sweep script to change matrix dimensions.
+The default sweep covers 4 strategies × 6 scratchpad sizes × 3 DRAM latencies × 4 bandwidths = **288 simulations**. Pass `--matrix-m/n/k` to change matrix dimensions, or `--scratchpad-latency` to use a different fixed scratchpad latency for every run.
 
 To sweep the global tuner instead of the four fixed strategies:
 
@@ -144,9 +141,9 @@ attention_qkv,256,768,768
 mlp_up,256,3072,768
 ```
 
-The driver defaults to `--strategy auto`, so each layer is tuned independently and the output CSV records the concrete winning strategy and tile shape. Hardware flags such as `--scratchpad-kb`, `--dram-latency`, `--bandwidth`, `--compute-ops`, and `--element-bytes` apply to every layer. `--tune-objective` and `--tune-budget` pass through to the auto-tuner.
+The driver defaults to `--strategy auto`, so each layer is tuned independently and the output CSV records the concrete winning strategy and tile shape. Hardware flags such as `--scratchpad-kb`, `--scratchpad-latency`, `--dram-latency`, `--bandwidth`, `--compute-ops`, and `--element-bytes` apply to every layer. `--tune-objective` and `--tune-budget` pass through to the auto-tuner.
 
-The workload CSV adds `layer_index` and `layer_name` in front of the normal simulator metrics. The script also prints total cycles, energy, DRAM bytes, overall throughput, and strategy counts.
+The workload CSV adds `layer_index` and `layer_name` in front of the normal simulator metrics. The script also prints total cycles, compute cycles, DRAM and scratchpad stall cycles, energy, DRAM bytes, overall throughput, and strategy counts.
 
 It writes three plots next to the output CSV:
 
@@ -168,6 +165,8 @@ python plots\plot_gantt.py
 
 By default this writes one Gantt chart per strategy to `results/`. Use `--strategy`, `--matrix-m/n/k`, `--tile-m/n/k`, and `--max-tiles` to focus on a smaller case when comparing schedules.
 
+The trace bars show DRAM load, compute, and DRAM store intervals. Gaps between those bars can represent the configured scratchpad pipeline delay; that delay is reported numerically as `scratchpad_stall_cycles`.
+
 ## Metrics
 
 The simulator emits:
@@ -177,6 +176,7 @@ The simulator emits:
 | `total_cycles` | Total simulated cycles |
 | `compute_cycles` | Cycles spent computing |
 | `dram_stall_cycles` | Cycles stalled waiting for DRAM |
+| `scratchpad_stall_cycles` | Pipeline-visible scratchpad delay before compute and before a nonzero C writeback |
 | `dram_bytes` | Total bytes transferred to/from DRAM |
 | `compute_utilization` | `compute_cycles / total_cycles` |
 | `arithmetic_intensity` | `operations / dram_bytes` (ops/byte) |
@@ -188,6 +188,14 @@ The simulator emits:
 | `c_reuse_factor` | Logical C tile demand divided by actual C DRAM load bytes |
 
 Tuned CSV rows also include `tuned`, `tune_objective`, the selected `tile_m/n/k`, and considered, evaluated, and rejected candidate counts. The `strategy` field contains the concrete winning strategy rather than `auto`. Normal rows retain zero tile values when a named strategy uses the square heuristic.
+
+Cycle accounting is exact for a completed simulation:
+
+```
+total_cycles = compute_cycles + dram_stall_cycles + scratchpad_stall_cycles
+```
+
+Scratchpad latency is modeled as a pipelined per-tile visibility delay, not as a serialized delay for every MAC. In double-buffer mode, the successor tile's DRAM prefetch starts once the current tile is resident and can overlap that current tile's scratchpad delay and compute.
 
 Reuse factors count loads only. C writebacks still contribute to `dram_bytes` and energy, but they are not included in `c_reuse_factor`.
 
@@ -206,6 +214,8 @@ energy_pj = dram_bytes        × 200 pJ/byte     (DDR4 off-chip access)
           + (operations / 2)  × 3.7 pJ/MAC      (ops/2 = number of MACs)
 ```
 
+Scratchpad latency changes timing but does not add a separate energy term; SRAM energy remains an access-count model.
+
 Key finding: **double buffering improves compute utilization but often reduces energy efficiency** relative to output stationary. The smaller tiles required for dual-buffer prefetching increase total DRAM traffic, and DRAM energy dominates the budget.
 
 ## Tiling Strategies
@@ -216,10 +226,10 @@ Key finding: **double buffering improves compute utilization but often reduces e
 
 **Input stationary**: keeps tile A(mi, ki), the input/activation tile, resident while streaming B and C across the N dimension. C is loaded and stored for each tile because this strategy does not retain output partial sums across K.
 
-**Double buffering**: uses output stationary tile ordering but prefetches the next tile's data from DRAM while the current tile is computing. Requires the scratchpad to hold two tiles simultaneously. When the scratchpad is too small for two tiles, it falls back to sequential output stationary behaviour.
+**Double buffering**: uses output stationary tile ordering but prefetches the next tile's data from DRAM as soon as the current tile is resident, overlapping the current tile's scratchpad delay and compute when capacity permits. It requires the scratchpad to hold two working tile footprints simultaneously. When the next pair does not fit, it falls back to sequential output-stationary behavior for that transition.
 
 ## Architecture Notes
 
-Double buffering only improves utilization when the scratchpad can hold two working tiles at once. With auto tile sizing, the double buffer strategy automatically sizes its tiles to half the scratchpad so prefetching is always active.
+Double buffering only improves utilization when the scratchpad can hold the current and successor working tiles at once. With auto tile sizing, the double-buffer strategy chooses a square tile sized for two full tile footprints, so full-tile transitions are capacity-safe for prefetching.
 
 Row stationary reduces intermediate C traffic by holding a row stripe of outputs across K. Input stationary instead focuses on activation reuse, so its Gantt charts should show A reuse but more frequent C traffic than row stationary.

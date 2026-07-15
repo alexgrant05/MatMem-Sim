@@ -33,13 +33,13 @@ static void test_all_strategies_produce_nonzero_metrics() {
 }
 
 // ── 2. Cycle accounting invariant ─────────────────────────────────────────
-// Every tick increments exactly one of compute_cycles or dram_stall_cycles,
-// and always increments total_cycles. So their sum must equal total_cycles.
+// Every tick increments exactly one of compute_cycles, dram_stall_cycles, or
+// scratchpad_stall_cycles, and always increments total_cycles.
 static void test_cycle_accounting_invariant() {
     const auto p = small_matrix();
     for (const auto* s : {"row_stationary", "output_stationary", "input_stationary", "double_buffer"}) {
         const auto m = run_simulation(p, s);
-        CHECK(m.compute_cycles + m.dram_stall_cycles == m.total_cycles);
+        CHECK(m.compute_cycles + m.dram_stall_cycles + m.scratchpad_stall_cycles == m.total_cycles);
     }
 }
 
@@ -224,7 +224,7 @@ static void test_double_buffer_mixed_tiles_falls_back_to_sequential() {
     const auto db = run_simulation(p, "double_buffer");
     const auto os = run_simulation(p, "output_stationary");
 
-    CHECK(db.compute_cycles + db.dram_stall_cycles == db.total_cycles);
+    CHECK(db.compute_cycles + db.dram_stall_cycles + db.scratchpad_stall_cycles == db.total_cycles);
     CHECK(db.dram_bytes == os.dram_bytes);
     // No prefetch fires → same cycle count as sequential output stationary.
     CHECK(db.total_cycles == os.total_cycles);
@@ -392,8 +392,8 @@ static void test_double_buffer_waits_for_prefetch_completion() {
     p.scratchpad_bytes = 20 * 1024;
 
     const auto db = run_simulation(p, "double_buffer");
-    CHECK(db.total_cycles == 1388);
-    CHECK(db.compute_cycles + db.dram_stall_cycles == db.total_cycles);
+    CHECK(db.total_cycles == 1390);
+    CHECK(db.compute_cycles + db.dram_stall_cycles + db.scratchpad_stall_cycles == db.total_cycles);
 }
 
 static void test_output_stationary_tile_k_affects_cycles() {
@@ -412,6 +412,27 @@ static void test_output_stationary_tile_k_affects_cycles() {
     CHECK(m1.dram_stall_cycles > m64.dram_stall_cycles);
     CHECK(m1.operations == m64.operations);           // same total work
     CHECK(m1.dram_bytes == m64.dram_bytes);           // same data volume
+}
+
+static void test_scratchpad_latency_affects_cycles() {
+    HardwareParams p;
+    p.matrix_m = p.matrix_n = p.matrix_k = 4;
+    p.tile_m = p.tile_n = p.tile_k = 4;
+    p.scratchpad_bytes = 1024;
+
+    p.scratchpad_latency_cycles = 0;
+    const auto zero = run_simulation(p, "row_stationary");
+
+    p.scratchpad_latency_cycles = 3;
+    const auto delayed = run_simulation(p, "row_stationary");
+
+    CHECK(delayed.total_cycles == zero.total_cycles + 6);
+    CHECK(delayed.scratchpad_stall_cycles == 6);
+    CHECK(zero.scratchpad_stall_cycles == 0);
+    CHECK(delayed.compute_cycles == zero.compute_cycles);
+    CHECK(delayed.dram_stall_cycles == zero.dram_stall_cycles);
+    CHECK(delayed.dram_bytes == zero.dram_bytes);
+    CHECK(delayed.operations == zero.operations);
 }
 
 static void test_huge_k_count_throws() {
@@ -446,13 +467,14 @@ static void test_trace_phase_ordering() {
     CHECK(t.size() == 1);
     CHECK(t[0].load_start    == 0);
     CHECK(t[0].load_end      == 106);
-    CHECK(t[0].compute_start == 106);
-    CHECK(t[0].compute_end   == 107);
-    CHECK(t[0].store_start   == 107);
-    CHECK(t[0].store_end     == 209);
-    CHECK(t[0].end           == 209);
+    CHECK(t[0].compute_start == 107);
+    CHECK(t[0].compute_end   == 108);
+    CHECK(t[0].store_start   == 109);
+    CHECK(t[0].store_end     == 211);
+    CHECK(t[0].end           == 211);
     // sanity: total_cycles must match
-    CHECK(m.total_cycles == 209);
+    CHECK(m.total_cycles == 211);
+    CHECK(m.scratchpad_stall_cycles == 2);
 
     // Ordering invariant holds for every tile in a multi-tile run
     std::vector<TraceRecord> t2;
@@ -486,10 +508,10 @@ static void test_double_buffer_trace_load_end() {
     CHECK(t.size() == 8);
     CHECK(t[1].load_start == 8192);
     CHECK(t[1].load_end == 16384);
-    CHECK(t[1].compute_start == 40960);
+    CHECK(t[1].compute_start == 40963);
     CHECK(t[1].load_end < t[1].compute_start);
-    CHECK(t[2].load_start == 45056);
-    CHECK(t[2].load_end == 53248);
+    CHECK(t[2].load_start == 45058);
+    CHECK(t[2].load_end == 53250);
 }
 
 // Non-final double-buffer stores are hidden under successor work, but they are
@@ -508,10 +530,10 @@ static void test_double_buffer_trace_store_overlap() {
     run_simulation(p, "double_buffer", &t);
 
     CHECK(t.size() == 8);
-    CHECK(t[0].compute_end == 40960);
-    CHECK(t[0].end == 40960);
-    CHECK(t[0].store_start == 40960);
-    CHECK(t[0].store_end == 45056);
+    CHECK(t[0].compute_end == 40961);
+    CHECK(t[0].end == 40962);
+    CHECK(t[0].store_start == 40962);
+    CHECK(t[0].store_end == 45058);
     CHECK(t[0].store_end > t[0].end);
 }
 
@@ -549,6 +571,7 @@ int main() {
     test_double_buffer_k_tile_prefetch_no_double_count();
     test_double_buffer_waits_for_prefetch_completion();
     test_output_stationary_tile_k_affects_cycles();
+    test_scratchpad_latency_affects_cycles();
     test_huge_tile_count_throws();
     test_huge_k_count_throws();
     test_compute_cycles_huge_ops_rounds_up();

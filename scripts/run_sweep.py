@@ -25,11 +25,12 @@ def find_executable() -> Path:
 
 def run_one(exe: Path, strategy: str, sp_kb: int, latency: int, bandwidth: int,
             matrix_m: int, matrix_n: int, matrix_k: int,
-            tune_objective: str, tune_budget: int) -> dict:
+            scratchpad_latency: int, tune_objective: str, tune_budget: int) -> dict:
     cmd = [
         str(exe),
         "--strategy", strategy,
         "--scratchpad-kb", str(sp_kb),
+        "--scratchpad-latency", str(scratchpad_latency),
         "--dram-latency", str(latency),
         "--bandwidth", str(bandwidth),
         "--matrix-m", str(matrix_m),
@@ -50,6 +51,7 @@ def main() -> None:
     parser.add_argument("--matrix-m", type=int, default=256)
     parser.add_argument("--matrix-n", type=int, default=256)
     parser.add_argument("--matrix-k", type=int, default=256)
+    parser.add_argument("--scratchpad-latency", type=int, default=1)
     parser.add_argument(
         "--strategy",
         choices=["all", "auto", "row_stationary", "output_stationary",
@@ -90,6 +92,7 @@ def main() -> None:
                 for bw in bandwidths:
                     rows.append(run_one(exe, strategy, sp_kb, latency, bw,
                                         args.matrix_m, args.matrix_n, args.matrix_k,
+                                        args.scratchpad_latency,
                                         args.tune_objective, args.tune_budget))
                     done += 1
                     print(f"  [{done}/{total}] {strategy} sp={sp_kb}KB lat={latency} bw={bw}", flush=True)

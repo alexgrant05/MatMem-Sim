@@ -50,6 +50,7 @@ void print_usage() {
         "usage: matmem-sim\n"
         "  [--strategy auto|row_stationary|output_stationary|input_stationary|double_buffer]\n"
         "  [--scratchpad-kb N]      scratchpad capacity in KB (default 32)\n"
+        "  [--scratchpad-latency N] scratchpad access latency in cycles (default 1)\n"
         "  [--dram-latency N]       DRAM round-trip latency in cycles (default 100)\n"
         "  [--bandwidth N]          DRAM bandwidth in bytes/cycle (default 32)\n"
         "  [--compute-ops N]        compute throughput in ops/cycle (default 256)\n"
@@ -88,6 +89,8 @@ int main(int argc, char** argv) {
                     throw std::invalid_argument("--scratchpad-kb value too large");
                 }
                 params.scratchpad_bytes = kb * 1024;
+            } else if (arg == "--scratchpad-latency") {
+                params.scratchpad_latency_cycles = parse_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--dram-latency") {
                 params.dram_latency_cycles = parse_uint(value_after(i, argc, argv), arg);
             } else if (arg == "--bandwidth") {
@@ -154,9 +157,9 @@ int main(int argc, char** argv) {
         }
 
         if (csv) {
-            std::cout << "strategy,scratchpad_kb,dram_latency,bandwidth,compute_ops,"
+            std::cout << "strategy,scratchpad_kb,scratchpad_latency,dram_latency,bandwidth,compute_ops,"
                          "matrix_m,matrix_n,matrix_k,"
-                         "total_cycles,compute_cycles,dram_stall_cycles,dram_bytes,"
+                         "total_cycles,compute_cycles,dram_stall_cycles,scratchpad_stall_cycles,dram_bytes,"
                          "compute_utilization,arithmetic_intensity,effective_ops_per_cycle,"
                          "energy_pj,ops_per_pj,"
                          "a_reuse_factor,b_reuse_factor,c_reuse_factor,"
@@ -165,6 +168,7 @@ int main(int argc, char** argv) {
                          "tune_candidates_rejected\n";
             std::cout << result_strategy << ','
                       << params.scratchpad_bytes / 1024 << ','
+                      << params.scratchpad_latency_cycles << ','
                       << params.dram_latency_cycles << ','
                       << params.dram_bandwidth_bytes_per_cycle << ','
                       << params.compute_ops_per_cycle << ','
@@ -174,6 +178,7 @@ int main(int argc, char** argv) {
                       << metrics.total_cycles << ','
                       << metrics.compute_cycles << ','
                       << metrics.dram_stall_cycles << ','
+                      << metrics.scratchpad_stall_cycles << ','
                       << metrics.dram_bytes << ','
                       << metrics.compute_utilization() << ','
                       << metrics.arithmetic_intensity() << ','
@@ -209,6 +214,7 @@ int main(int argc, char** argv) {
             std::cout << "total_cycles: " << metrics.total_cycles << '\n';
             std::cout << "compute_cycles: " << metrics.compute_cycles << '\n';
             std::cout << "dram_stall_cycles: " << metrics.dram_stall_cycles << '\n';
+            std::cout << "scratchpad_stall_cycles: " << metrics.scratchpad_stall_cycles << '\n';
             std::cout << "dram_bytes: " << metrics.dram_bytes << '\n';
             std::cout << "compute_utilization: " << metrics.compute_utilization() << '\n';
             std::cout << "arithmetic_intensity: " << metrics.arithmetic_intensity() << '\n';
